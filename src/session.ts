@@ -3,7 +3,7 @@ import { Frame, Model, Structure, StructureElement, Unit } from 'molstar/lib/mol
 import { Mat3, Mat4, Vec3 } from 'molstar/lib/mol-math/linear-algebra';
 
 export type EditKind = 'move' | 'rotate';
-export type EditState = 'idle' | 'armed-move' | 'armed-rotate' | 'dragging-translate' | 'dragging-rotate' | 'committing' | 'cancelled';
+export type EditState = 'idle' | 'armed-transform' | 'dragging-translate' | 'dragging-rotate' | 'committing' | 'cancelled';
 export type GizmoHandle = 'translate-x' | 'translate-y' | 'translate-z' | 'rotate-x' | 'rotate-y' | 'rotate-z';
 
 export interface EditSession {

@@ -10,7 +10,7 @@ import { Binding } from 'molstar/lib/mol-util/binding';
 import { Mat4, Vec2, Vec3, Vec4 } from 'molstar/lib/mol-math/linear-algebra';
 import { StructureEditorCommands } from './commands';
 import { CoordinateUpdater } from './coordinate-updater';
-import { pickGizmoHandleAtPoint } from './gizmo-hit-test';
+import { getClosestPolylineSegment, Point as ScreenPoint, pickGizmoHandleAtPoint } from './gizmo-hit-test';
 import { GizmoHandleId, StructureEditorGizmo3D } from './gizmo-representation';
 import { EditKind, EditSession, EditState, applyRotationStep, applyTranslationStep, cancelSession, commitSession, createEditSession } from './session';
 import { getSingleSelectionEntry } from './selection-target';
@@ -21,6 +21,8 @@ export type StructureEditorOptions = {
     maxRealtimeAtoms?: number
     realtimeUpdateMode?: 'always'
 };
+
+export const DEFAULT_GIZMO_SCALE = 2.5;
 
 type TrackballBindings = NonNullable<NonNullable<PluginContext['canvas3d']>['attribs']['trackball']>['bindings'];
 
@@ -106,6 +108,25 @@ function getHandleAxis(handle: GizmoHandleId) {
     return Vec3.unitZ;
 }
 
+function getRingBasis(axis: Vec3): [Vec3, Vec3] {
+    if (axis[0] === 1) return [Vec3.unitY, Vec3.unitZ];
+    if (axis[1] === 1) return [Vec3.unitZ, Vec3.unitX];
+    return [Vec3.unitX, Vec3.unitY];
+}
+
+function sampleProjectedRingPoints(plugin: PluginContext, anchor: Vec3, axis: Vec3, radius: number, segmentCount = 64) {
+    const [basisA, basisB] = getRingBasis(axis);
+    const points: ScreenPoint[] = [];
+    for (let i = 0; i < segmentCount; i++) {
+        const t = (i / segmentCount) * Math.PI * 2;
+        const point = Vec3.clone(anchor);
+        Vec3.scaleAndAdd(point, point, basisA, Math.cos(t) * radius);
+        Vec3.scaleAndAdd(point, point, basisB, Math.sin(t) * radius);
+        points.push(getCanvasClientPoint(plugin, point));
+    }
+    return points;
+}
+
 function getProjectedGizmoPoints(plugin: PluginContext, session: EditSession, scale: number) {
     const anchor = getCurrentAnchor(session);
     const axisOffset = (axis: Vec3, distance: number) => Vec3.add(Vec3(), anchor, Vec3.scale(Vec3(), axis, distance));
@@ -113,9 +134,9 @@ function getProjectedGizmoPoints(plugin: PluginContext, session: EditSession, sc
     const translateY = getCanvasClientPoint(plugin, axisOffset(Vec3.unitY, scale));
     const translateZ = getCanvasClientPoint(plugin, axisOffset(Vec3.unitZ, scale));
     const rotateRadius = scale * 0.9;
-    const rotateX = getCanvasClientPoint(plugin, axisOffset(Vec3.unitX, rotateRadius));
-    const rotateY = getCanvasClientPoint(plugin, axisOffset(Vec3.unitY, rotateRadius));
-    const rotateZ = getCanvasClientPoint(plugin, axisOffset(Vec3.unitZ, rotateRadius));
+    const rotateX = sampleProjectedRingPoints(plugin, anchor, Vec3.unitX, rotateRadius);
+    const rotateY = sampleProjectedRingPoints(plugin, anchor, Vec3.unitY, rotateRadius);
+    const rotateZ = sampleProjectedRingPoints(plugin, anchor, Vec3.unitZ, rotateRadius);
     return {
         center: getCanvasClientPoint(plugin, anchor),
         translate: {
@@ -139,7 +160,6 @@ export class StructureEditorController {
     private session: EditSession | undefined = void 0;
     private sessionModelRef: string | undefined = void 0;
     private state: EditState = 'idle';
-    private armedKind: EditKind | undefined = void 0;
     private dragOperation: DragOperation | undefined = void 0;
     private dragPointerId: number | undefined = void 0;
     private dragLastPoint: Point2 | undefined = void 0;
@@ -155,8 +175,8 @@ export class StructureEditorController {
     constructor(private readonly plugin: PluginContext, private readonly options: Required<StructureEditorOptions>) {
         this.updater = new CoordinateUpdater(plugin);
         this.subs.push(
-            StructureEditorCommands.EnterMoveMode.subscribe(plugin, () => this.enterMode('move')),
-            StructureEditorCommands.EnterRotateMode.subscribe(plugin, () => this.enterMode('rotate')),
+            StructureEditorCommands.EnterMoveMode.subscribe(plugin, () => this.enterTransformMode()),
+            StructureEditorCommands.EnterRotateMode.subscribe(plugin, () => this.enterTransformMode()),
             StructureEditorCommands.CommitEdit.subscribe(plugin, () => this.commit()),
             StructureEditorCommands.CancelEdit.subscribe(plugin, () => this.cancel()),
             plugin.behaviors.interaction.click.subscribe(event => this.onClick(event)),
@@ -174,7 +194,7 @@ export class StructureEditorController {
         this.restoreInteractivity();
     }
 
-    async enterMode(kind: EditKind) {
+    async enterTransformMode() {
         try {
             const selectedEntry = getSelectionEntry(this.plugin);
             const entry = selectedEntry?.entry as any;
@@ -222,8 +242,7 @@ export class StructureEditorController {
             await this.showEditableStructure(sourceStructureRef, coordinateNode.ref);
             await this.showGizmo();
             this.attachPointerEvents();
-            this.setState(kind === 'move' ? 'armed-move' : 'armed-rotate');
-            this.armedKind = kind;
+            this.setState('armed-transform');
             this.previousSelectionMode = this.plugin.selectionMode;
             this.plugin.selectionMode = true;
         } catch (error) {
@@ -262,7 +281,6 @@ export class StructureEditorController {
         this.restoreInteractivity();
         this.session = void 0;
         this.sessionModelRef = void 0;
-        this.armedKind = void 0;
         this.sourceStructureRef = void 0;
         this.previewStructureRef = void 0;
         this.setState('idle');
@@ -324,9 +342,7 @@ export class StructureEditorController {
     }
 
     private getGizmoScale() {
-        if (!this.plugin.canvas3d || !this.session) return 1;
-        const anchor = getCurrentAnchor(this.session);
-        return this.plugin.canvas3d.camera.getPixelSize(anchor) * 90;
+        return DEFAULT_GIZMO_SCALE;
     }
 
     private async showGizmo() {
@@ -385,7 +401,6 @@ export class StructureEditorController {
         this.dragOperation = { handle, kind };
         this.dragPointerId = pointerId;
         this.dragLastPoint = point;
-        this.armedKind = kind;
         this.setState(kind === 'move' ? 'dragging-translate' : 'dragging-rotate');
         void this.showGizmo();
     }
@@ -395,7 +410,7 @@ export class StructureEditorController {
         this.dragOperation = void 0;
         this.dragPointerId = void 0;
         this.dragLastPoint = void 0;
-        this.setState(this.armedKind === 'rotate' ? 'armed-rotate' : 'armed-move');
+        this.setState('armed-transform');
         void this.showGizmo();
     }
 
@@ -449,7 +464,7 @@ export class StructureEditorController {
         this.endPointerDrag(event.pointerId);
     };
 
-    private async applyQuickStyle(preset: 'default' | 'cartoon' | 'spacefill' | 'surface') {
+    private async applyQuickStyle(preset: 'default' | 'cartoon' | 'ball-and-stick' | 'spacefill' | 'surface') {
         const structures = this.plugin.managers.structure.hierarchy.current.structures;
         if (structures.length === 0) {
             showToast(this.plugin, 'Structure Editor', 'Load a structure before applying a style.');
@@ -462,6 +477,8 @@ export class StructureEditorController {
             )
             : preset === 'cartoon'
                 ? PresetStructureRepresentations['polymer-and-ligand']
+                : preset === 'ball-and-stick'
+                    ? PresetStructureRepresentations['atomic-detail']
                 : preset === 'spacefill'
                     ? PresetStructureRepresentations.illustrative
                     : PresetStructureRepresentations['molecular-surface'];
@@ -504,14 +521,17 @@ export class StructureEditorController {
 
     private projectRotationAngle(axis: Vec3, start: Vec2, end: Vec2) {
         const anchor = getCurrentAnchor(this.session!);
-        const screenAnchor = toVec2(getCanvasClientPoint(this.plugin, anchor));
-        const a = Vec2.sub(Vec2(), start, screenAnchor);
-        const b = Vec2.sub(Vec2(), end, screenAnchor);
-        const cross = a[0] * b[1] - a[1] * b[0];
-        const dot = a[0] * b[0] + a[1] * b[1];
-        const viewDir = Vec3.normalize(Vec3(), Vec3.sub(Vec3(), this.plugin.canvas3d!.camera.state.target, this.plugin.canvas3d!.camera.state.position));
-        const sign = Vec3.dot(viewDir, axis) >= 0 ? -1 : 1;
-        return Math.atan2(cross, dot) * sign;
+        const ring = sampleProjectedRingPoints(this.plugin, anchor, axis, this.getGizmoScale() * 0.9);
+        const nearest = getClosestPolylineSegment([start[0], start[1]], ring);
+        if (!nearest) return 0;
+
+        const tangent = Vec2.sub(Vec2(), Vec2.create(nearest.end[0], nearest.end[1]), Vec2.create(nearest.start[0], nearest.start[1]));
+        const tangentLength = Math.max(Vec2.magnitude(tangent), 1e-6);
+        Vec2.scale(tangent, tangent, 1 / tangentLength);
+
+        const delta = Vec2.sub(Vec2(), end, start);
+        const segmentAngle = (Math.PI * 2) / ring.length;
+        return (delta[0] * tangent[0] + delta[1] * tangent[1]) / tangentLength * segmentAngle;
     }
 
     private mountToolbar() {
@@ -532,8 +552,7 @@ export class StructureEditorController {
         toolbar.style.zIndex = '20';
 
         const buttons = [
-            ['Move', () => this.enterMode('move')],
-            ['Rotate', () => this.enterMode('rotate')],
+            ['Transform', () => this.enterTransformMode()],
             ['Apply', () => this.commit()],
             ['Cancel', () => this.cancel()],
         ] as const;
@@ -557,6 +576,7 @@ export class StructureEditorController {
         const styleButtons = [
             ['Default', () => this.applyQuickStyle('default')],
             ['Cartoon', () => this.applyQuickStyle('cartoon')],
+            ['Ball & Stick', () => this.applyQuickStyle('ball-and-stick')],
             ['Spacefill', () => this.applyQuickStyle('spacefill')],
             ['Surface', () => this.applyQuickStyle('surface')],
         ] as const;
@@ -589,9 +609,8 @@ export class StructureEditorController {
         const buttons = Array.from(this.toolbar.querySelectorAll('button'));
         const hasSession = !!this.session;
         if (buttons[0]) (buttons[0] as HTMLButtonElement).disabled = hasSession && this.state.startsWith('dragging');
-        if (buttons[1]) (buttons[1] as HTMLButtonElement).disabled = hasSession && this.state.startsWith('dragging');
+        if (buttons[1]) (buttons[1] as HTMLButtonElement).disabled = !hasSession;
         if (buttons[2]) (buttons[2] as HTMLButtonElement).disabled = !hasSession;
-        if (buttons[3]) (buttons[3] as HTMLButtonElement).disabled = !hasSession;
     }
 }
 

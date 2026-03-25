@@ -43,11 +43,11 @@ function addAxis(mesh: MeshBuilder.State, start: Vec3, end: Vec3, radius: number
     addSphere(mesh, end, radius * 2.1, 2);
 }
 
-function circleTransform(axis: Vec3, anchor: Vec3, radius: number) {
+export function getRingTransform(axis: Vec3, anchor: Vec3, radius: number) {
     const t = Mat4.identity();
     if (axis[0] === 1) {
-        Mat4.mul(t, Mat4.fromRotation(Mat4(), Math.PI / 2, Vec3.unitY), t);
-    } else if (axis[1] === 1) {
+        Mat4.mul(t, Mat4.fromRotation(Mat4(), Math.PI / -2, Vec3.unitZ), t);
+    } else if (axis[2] === 1) {
         Mat4.mul(t, Mat4.fromRotation(Mat4(), Math.PI / 2, Vec3.unitX), t);
     }
     Mat4.scaleUniformly(t, t, radius);
@@ -56,7 +56,7 @@ function circleTransform(axis: Vec3, anchor: Vec3, radius: number) {
 }
 
 function addRing(mesh: MeshBuilder.State, axis: Vec3, anchor: Vec3, radius: number, tubeRadius: number, group: number) {
-    const primitive = transformPrimitive(Circle({ radius: 1, segments: 96 }), circleTransform(axis, anchor, radius));
+    const primitive = transformPrimitive(Circle({ radius: 1, segments: 96 }), getRingTransform(axis, anchor, radius));
     mesh.currentGroup = group;
     const { indices, vertices } = primitive;
     const a = Vec3.zero();
