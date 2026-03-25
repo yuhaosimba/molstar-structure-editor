@@ -1,15 +1,19 @@
 import { Subscription } from 'rxjs';
-import { ShapeGroup } from 'molstar/lib/mol-model/shape';
 import { StructureElement } from 'molstar/lib/mol-model/structure';
 import { PluginCommands } from 'molstar/lib/mol-plugin/commands';
 import { PluginContext } from 'molstar/lib/mol-plugin/context';
+import { setSubtreeVisibility } from 'molstar/lib/mol-plugin/behavior/static/state';
+import { PresetStructureRepresentations } from 'molstar/lib/mol-plugin-state/builder/structure/representation-preset';
 import { StateTransforms } from 'molstar/lib/mol-plugin-state/transforms';
+import { PluginConfig } from 'molstar/lib/mol-plugin/config';
 import { Binding } from 'molstar/lib/mol-util/binding';
 import { Mat4, Vec2, Vec3, Vec4 } from 'molstar/lib/mol-math/linear-algebra';
 import { StructureEditorCommands } from './commands';
 import { CoordinateUpdater } from './coordinate-updater';
-import { GizmoGroupIds, GizmoHandleId, StructureEditorGizmo3D } from './gizmo-representation';
+import { pickGizmoHandleAtPoint } from './gizmo-hit-test';
+import { GizmoHandleId, StructureEditorGizmo3D } from './gizmo-representation';
 import { EditKind, EditSession, EditState, applyRotationStep, applyTranslationStep, cancelSession, commitSession, createEditSession } from './session';
+import { getSingleSelectionEntry } from './selection-target';
 
 export type StructureEditorOptions = {
     autoAttach?: boolean
@@ -24,6 +28,10 @@ type DragOperation = {
     handle: GizmoHandleId
     kind: EditKind
 };
+
+type Point2 = [number, number];
+type RectLike = { left: number; top: number; width: number; height: number };
+type SizeLike = { width: number; height: number };
 
 type EditorStore = {
     controller?: StructureEditorController
@@ -48,13 +56,7 @@ function showToast(plugin: PluginContext, title: string, message: string, timeou
 }
 
 function getSelectionEntry(plugin: PluginContext) {
-    const entries = Array.from(plugin.managers.structure.selection.entries.values())
-        .filter(entry => !!entry.structure);
-    if (entries.length === 0) return;
-    if (entries.length > 1) {
-        throw new Error('Editing selections spanning multiple structures is not supported in v1.');
-    }
-    return entries[0];
+    return getSingleSelectionEntry(plugin.managers.structure.selection.entries);
 }
 
 function cloneBindings(bindings: TrackballBindings): TrackballBindings {
@@ -73,9 +75,25 @@ function getDisabledBindings(bindings: TrackballBindings): TrackballBindings {
     };
 }
 
-function getScreenPoint(plugin: PluginContext, point: Vec3) {
+export function projectViewportPointToClientPoint(projected: Vec4 | [number, number, number, number], rect: RectLike, canvas: SizeLike): Point2 {
+    const scaleX = rect.width / Math.max(canvas.width, 1);
+    const scaleY = rect.height / Math.max(canvas.height, 1);
+    return [
+        rect.left + projected[0] * scaleX,
+        rect.top + (canvas.height - projected[1]) * scaleY,
+    ];
+}
+
+function getCanvasClientPoint(plugin: PluginContext, point: Vec3): Point2 {
+    const canvas = plugin.canvas3dContext?.canvas;
+    if (!canvas) return [0, 0];
     const projected = plugin.canvas3d!.camera.project(Vec4(), point);
-    return Vec2.create(projected[0], projected[1]);
+    const rect = canvas.getBoundingClientRect();
+    return projectViewportPointToClientPoint(projected, rect, canvas);
+}
+
+function toVec2(point: Point2) {
+    return Vec2.create(point[0], point[1]);
 }
 
 function getCurrentAnchor(session: EditSession) {
@@ -88,14 +106,29 @@ function getHandleAxis(handle: GizmoHandleId) {
     return Vec3.unitZ;
 }
 
-function inferHandle(current: any): GizmoHandleId | undefined {
-    if (!ShapeGroup.isLoci(current.loci)) return;
-    const sourceData = current.loci.shape.sourceData as { tag?: string } | undefined;
-    if (sourceData?.tag !== 'structure-editor-gizmo') return;
-    const group = current.loci.groups[0];
-    if (!group) return;
-    const first = group.ids[0];
-    return GizmoGroupIds[first];
+function getProjectedGizmoPoints(plugin: PluginContext, session: EditSession, scale: number) {
+    const anchor = getCurrentAnchor(session);
+    const axisOffset = (axis: Vec3, distance: number) => Vec3.add(Vec3(), anchor, Vec3.scale(Vec3(), axis, distance));
+    const translateX = getCanvasClientPoint(plugin, axisOffset(Vec3.unitX, scale));
+    const translateY = getCanvasClientPoint(plugin, axisOffset(Vec3.unitY, scale));
+    const translateZ = getCanvasClientPoint(plugin, axisOffset(Vec3.unitZ, scale));
+    const rotateRadius = scale * 0.9;
+    const rotateX = getCanvasClientPoint(plugin, axisOffset(Vec3.unitX, rotateRadius));
+    const rotateY = getCanvasClientPoint(plugin, axisOffset(Vec3.unitY, rotateRadius));
+    const rotateZ = getCanvasClientPoint(plugin, axisOffset(Vec3.unitZ, rotateRadius));
+    return {
+        center: getCanvasClientPoint(plugin, anchor),
+        translate: {
+            x: translateX,
+            y: translateY,
+            z: translateZ,
+        },
+        rotate: {
+            x: rotateX,
+            y: rotateY,
+            z: rotateZ,
+        },
+    };
 }
 
 export class StructureEditorController {
@@ -106,11 +139,18 @@ export class StructureEditorController {
     private session: EditSession | undefined = void 0;
     private sessionModelRef: string | undefined = void 0;
     private state: EditState = 'idle';
+    private armedKind: EditKind | undefined = void 0;
     private dragOperation: DragOperation | undefined = void 0;
+    private dragPointerId: number | undefined = void 0;
+    private dragLastPoint: Point2 | undefined = void 0;
     private rafHandle = 0;
     private pendingFrame = false;
     private previousSelectionMode = false;
     private previousBindings: TrackballBindings | undefined = void 0;
+    private pointerHost: HTMLElement | undefined = void 0;
+    private lastPickedLoci: StructureElement.Loci | undefined = void 0;
+    private sourceStructureRef: string | undefined = void 0;
+    private previewStructureRef: string | undefined = void 0;
 
     constructor(private readonly plugin: PluginContext, private readonly options: Required<StructureEditorOptions>) {
         this.updater = new CoordinateUpdater(plugin);
@@ -120,7 +160,6 @@ export class StructureEditorController {
             StructureEditorCommands.CommitEdit.subscribe(plugin, () => this.commit()),
             StructureEditorCommands.CancelEdit.subscribe(plugin, () => this.cancel()),
             plugin.behaviors.interaction.click.subscribe(event => this.onClick(event)),
-            plugin.behaviors.interaction.drag.subscribe(event => this.onDrag(event)),
             plugin.behaviors.interaction.key.subscribe(event => this.onKey(event)),
         );
 
@@ -130,54 +169,63 @@ export class StructureEditorController {
     dispose() {
         for (const sub of this.subs) sub.unsubscribe();
         this.destroyToolbar();
+        this.detachPointerEvents();
         void this.hideGizmo();
         this.restoreInteractivity();
     }
 
     async enterMode(kind: EditKind) {
         try {
-            const entry = getSelectionEntry(this.plugin);
-            if (!entry?.selection || !entry.structure) {
+            const selectedEntry = getSelectionEntry(this.plugin);
+            const entry = selectedEntry?.entry as any;
+            const selection = (entry?.selection ?? entry?._selection) as any;
+            const structureRef = (selection?.structure ?? entry?.structure ?? entry?._structure?.structure) as any;
+            if (!selectedEntry?.ref || !selection || !structureRef) {
                 showToast(this.plugin, 'Structure Editor', 'Select atoms before entering edit mode.');
                 return;
             }
 
-            const selected = entry.selection;
-            const parentCell = this.plugin.helpers.substructureParent.get(entry.structure, true);
-            if (!parentCell) {
+            const model = structureRef.model;
+            const hierarchyStructure = this.plugin.managers.structure.hierarchy.current.structures.find((current: any) => current.model?.cell?.obj?.data?.id === model.id);
+            const modelRef = hierarchyStructure?.model?.cell?.transform?.ref;
+            const sourceStructureRef = hierarchyStructure?.cell?.transform?.ref;
+            if (!model || !modelRef || !sourceStructureRef) {
                 showToast(this.plugin, 'Structure Editor', 'Could not resolve the selected structure.');
                 return;
             }
 
-            const hierarchy = this.plugin.managers.structure.hierarchy.current;
-            const structureRef = hierarchy.structures.find(s => s.cell.transform.ref === parentCell.transform.ref);
-            const modelRef = structureRef?.model?.cell.transform.ref;
-            if (!structureRef || !modelRef || !structureRef.cell.obj?.data.model) {
-                showToast(this.plugin, 'Structure Editor', 'Could not resolve the selected model.');
+            const effectiveSelection = selection.elements.length > 0 ? selection : this.lastPickedLoci;
+            if (!effectiveSelection || effectiveSelection.structure?.model?.id !== model.id) {
+                showToast(this.plugin, 'Structure Editor', 'Select atoms before entering edit mode.');
                 return;
             }
 
-            if (!selected.elements.every(e => Mat4.isIdentity(e.unit.conformation.operator.matrix))) {
+            if (!effectiveSelection.elements.every((e: any) => Mat4.isIdentity(e.unit.conformation.operator.matrix))) {
                 showToast(this.plugin, 'Structure Editor', 'Selections on transformed assembly copies are not supported in v1.');
                 return;
             }
 
             this.session = createEditSession({
-                model: structureRef.cell.obj.data.model,
-                structure: entry.structure,
-                selection: selected,
+                model,
+                structure: structureRef,
+                selection: effectiveSelection,
                 maxRealtimeAtoms: this.options.maxRealtimeAtoms,
             });
             this.sessionModelRef = modelRef;
+            this.sourceStructureRef = sourceStructureRef;
 
             if (this.session.atomIndices.length > this.options.maxRealtimeAtoms) {
                 showToast(this.plugin, 'Structure Editor', `Large selection (${this.session.atomIndices.length} atoms). Realtime updates will be throttled to animation frames.`);
             }
 
-            await this.updater.ensureCoordinateNode(modelRef);
+            const coordinateNode = await this.updater.updateNow(modelRef, this.session.currentFrame);
+            await this.showEditableStructure(sourceStructureRef, coordinateNode.ref);
             await this.showGizmo();
+            this.attachPointerEvents();
             this.setState(kind === 'move' ? 'armed-move' : 'armed-rotate');
-            this.disableInteractivity();
+            this.armedKind = kind;
+            this.previousSelectionMode = this.plugin.selectionMode;
+            this.plugin.selectionMode = true;
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to start the edit session.';
             showToast(this.plugin, 'Structure Editor', message);
@@ -188,6 +236,11 @@ export class StructureEditorController {
         if (!this.session) return;
         commitSession(this.session);
         await this.pushFrame();
+        if (this.sourceStructureRef) {
+            await this.plugin.build().delete(this.sourceStructureRef).commit();
+        }
+        this.sourceStructureRef = this.previewStructureRef;
+        this.previewStructureRef = void 0;
         this.finishSession('idle');
     }
 
@@ -195,16 +248,23 @@ export class StructureEditorController {
         if (!this.session) return;
         cancelSession(this.session);
         await this.pushFrame();
+        await this.cleanupEditableStructure(true);
         this.finishSession('cancelled');
     }
 
     private finishSession(state: EditState) {
         this.setState(state);
         this.dragOperation = void 0;
+        this.dragPointerId = void 0;
+        this.dragLastPoint = void 0;
         void this.hideGizmo();
+        this.detachPointerEvents();
         this.restoreInteractivity();
         this.session = void 0;
         this.sessionModelRef = void 0;
+        this.armedKind = void 0;
+        this.sourceStructureRef = void 0;
+        this.previewStructureRef = void 0;
         this.setState('idle');
     }
 
@@ -214,8 +274,7 @@ export class StructureEditorController {
     }
 
     private disableInteractivity() {
-        this.previousSelectionMode = this.plugin.selectionMode;
-        this.plugin.selectionMode = true;
+        if (this.previousBindings || !this.plugin.canvas3d) return;
         this.previousBindings = cloneBindings(this.plugin.canvas3d!.attribs.trackball.bindings);
         this.plugin.canvas3d!.setAttribs({ trackball: { bindings: getDisabledBindings(this.previousBindings) } });
     }
@@ -232,6 +291,27 @@ export class StructureEditorController {
         if (!this.session || !this.sessionModelRef) return;
         this.updater.schedule(this.sessionModelRef, this.session.currentFrame);
         await this.showGizmo();
+    }
+
+    private async showEditableStructure(sourceStructureRef: string, coordinateModelRef: string) {
+        if (!this.previewStructureRef) {
+            setSubtreeVisibility(this.plugin.state.data, sourceStructureRef, true);
+            const structure = await this.plugin.builders.structure.createStructure(coordinateModelRef);
+            await this.plugin.builders.structure.representation.applyPreset(structure, 'auto');
+            this.previewStructureRef = structure.ref;
+            return;
+        }
+        setSubtreeVisibility(this.plugin.state.data, this.previewStructureRef, false);
+    }
+
+    private async cleanupEditableStructure(restoreSource: boolean) {
+        if (restoreSource && this.sourceStructureRef) {
+            setSubtreeVisibility(this.plugin.state.data, this.sourceStructureRef, false);
+        }
+        if (this.previewStructureRef) {
+            await this.plugin.build().delete(this.previewStructureRef).commit();
+            this.previewStructureRef = void 0;
+        }
     }
 
     private scheduleFrame() {
@@ -268,12 +348,125 @@ export class StructureEditorController {
             .apply(StateTransforms.Representation.ShapeRepresentation3D, {
                 alpha: 1,
                 doubleSided: true,
-                xrayShaded: true,
-                ignoreLight: true,
+                xrayShaded: false,
+                ignoreLight: false,
             });
 
         await update.commit();
         this.gizmoRef = update.selector.cell?.transform.parent;
+    }
+
+    private attachPointerEvents() {
+        const canvas = this.plugin.canvas3dContext?.canvas;
+        if (!canvas || this.pointerHost === canvas) return;
+        canvas.addEventListener('pointerdown', this.onPointerDown, true);
+        canvas.addEventListener('pointermove', this.onPointerMove, true);
+        canvas.addEventListener('pointerup', this.onPointerUp, true);
+        canvas.addEventListener('pointercancel', this.onPointerCancel, true);
+        canvas.style.touchAction = 'none';
+        this.pointerHost = canvas;
+    }
+
+    private detachPointerEvents() {
+        if (!this.pointerHost) return;
+        this.pointerHost.removeEventListener('pointerdown', this.onPointerDown, true);
+        this.pointerHost.removeEventListener('pointermove', this.onPointerMove, true);
+        this.pointerHost.removeEventListener('pointerup', this.onPointerUp, true);
+        this.pointerHost.removeEventListener('pointercancel', this.onPointerCancel, true);
+        this.pointerHost = void 0;
+    }
+
+    private getClientPointFromPointer(event: PointerEvent): Point2 {
+        return [event.clientX, event.clientY];
+    }
+
+    private beginPointerDrag(handle: GizmoHandleId, pointerId: number, point: Point2) {
+        const kind: EditKind = handle.startsWith('translate') ? 'move' : 'rotate';
+        this.dragOperation = { handle, kind };
+        this.dragPointerId = pointerId;
+        this.dragLastPoint = point;
+        this.armedKind = kind;
+        this.setState(kind === 'move' ? 'dragging-translate' : 'dragging-rotate');
+        void this.showGizmo();
+    }
+
+    private endPointerDrag(pointerId: number) {
+        if (this.dragPointerId !== pointerId) return;
+        this.dragOperation = void 0;
+        this.dragPointerId = void 0;
+        this.dragLastPoint = void 0;
+        this.setState(this.armedKind === 'rotate' ? 'armed-rotate' : 'armed-move');
+        void this.showGizmo();
+    }
+
+    private onPointerDown = (event: PointerEvent) => {
+        if (!this.session) return;
+        const projected = getProjectedGizmoPoints(this.plugin, this.session, this.getGizmoScale());
+        const pointer = this.getClientPointFromPointer(event);
+        const handle = pickGizmoHandleAtPoint(
+            [projected.center[0], projected.center[1]],
+            projected,
+            pointer,
+        );
+        if (!handle) return;
+        event.preventDefault();
+        event.stopPropagation();
+        (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+        this.disableInteractivity();
+        this.beginPointerDrag(handle, event.pointerId, pointer);
+    };
+
+    private onPointerMove = (event: PointerEvent) => {
+        if (!this.session || !this.dragOperation || this.dragPointerId !== event.pointerId || !this.plugin.canvas3d) return;
+        const current = this.getClientPointFromPointer(event);
+        const previous = this.dragLastPoint ?? current;
+        if (this.dragOperation.kind === 'move') {
+            const axis = getHandleAxis(this.dragOperation.handle);
+            const distance = this.projectTranslationDistance(axis, toVec2(previous), toVec2(current));
+            applyTranslationStep(this.session, axis, distance);
+        } else {
+            const axis = getHandleAxis(this.dragOperation.handle);
+            const angle = this.projectRotationAngle(axis, toVec2(previous), toVec2(current));
+            applyRotationStep(this.session, axis, angle);
+        }
+        this.dragLastPoint = current;
+        this.scheduleFrame();
+        event.preventDefault();
+        event.stopPropagation();
+    };
+
+    private onPointerUp = (event: PointerEvent) => {
+        if (this.dragPointerId !== event.pointerId) return;
+        this.restoreInteractivity();
+        this.endPointerDrag(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+    };
+
+    private onPointerCancel = (event: PointerEvent) => {
+        if (this.dragPointerId !== event.pointerId) return;
+        this.restoreInteractivity();
+        this.endPointerDrag(event.pointerId);
+    };
+
+    private async applyQuickStyle(preset: 'default' | 'cartoon' | 'spacefill' | 'surface') {
+        const structures = this.plugin.managers.structure.hierarchy.current.structures;
+        if (structures.length === 0) {
+            showToast(this.plugin, 'Structure Editor', 'Load a structure before applying a style.');
+            return;
+        }
+
+        const provider = preset === 'default'
+            ? this.plugin.builders.structure.representation.resolveProvider(
+                this.plugin.config.get(PluginConfig.Structure.DefaultRepresentationPreset) || PresetStructureRepresentations.auto.id,
+            )
+            : preset === 'cartoon'
+                ? PresetStructureRepresentations['polymer-and-ligand']
+                : preset === 'spacefill'
+                    ? PresetStructureRepresentations.illustrative
+                    : PresetStructureRepresentations['molecular-surface'];
+
+        await this.plugin.managers.structure.component.applyPreset(structures, provider as any);
     }
 
     private async hideGizmo() {
@@ -284,30 +477,10 @@ export class StructureEditorController {
     }
 
     private onClick(event: any) {
-        if (!this.session) return;
-        const handle = inferHandle(event.current);
-        if (!handle) return;
-        const kind: EditKind = handle.startsWith('translate') ? 'move' : 'rotate';
-        this.dragOperation = { handle, kind };
-        this.setState(kind === 'move' ? 'dragging-translate' : 'dragging-rotate');
-        void this.showGizmo();
-    }
-
-    private onDrag(event: any) {
-        if (!this.session || !this.dragOperation || !this.plugin.canvas3d) return;
-        const start = event.pageStart as Vec2;
-        const end = event.pageEnd as Vec2;
-
-        if (this.dragOperation.kind === 'move') {
-            const axis = getHandleAxis(this.dragOperation.handle);
-            const distance = this.projectTranslationDistance(axis, start, end);
-            applyTranslationStep(this.session, axis, distance);
-        } else {
-            const axis = getHandleAxis(this.dragOperation.handle);
-            const angle = this.projectRotationAngle(axis, start, end);
-            applyRotationStep(this.session, axis, angle);
+        const loci = event.current?.loci as StructureElement.Loci | undefined;
+        if (loci?.kind === 'element-loci' && loci.elements.length > 0 && loci.structure?.model?.id) {
+            this.lastPickedLoci = loci;
         }
-        this.scheduleFrame();
     }
 
     private onKey(event: { key?: string; code?: string }) {
@@ -320,17 +493,18 @@ export class StructureEditorController {
 
     private projectTranslationDistance(axis: Vec3, start: Vec2, end: Vec2) {
         const anchor = getCurrentAnchor(this.session!);
-        const p0 = getScreenPoint(this.plugin, anchor);
-        const p1 = getScreenPoint(this.plugin, Vec3.add(Vec3(), anchor, axis));
+        const scale = this.getGizmoScale();
+        const p0 = toVec2(getCanvasClientPoint(this.plugin, anchor));
+        const p1 = toVec2(getCanvasClientPoint(this.plugin, Vec3.scaleAndAdd(Vec3(), anchor, axis, scale)));
         const axisScreen = Vec2.sub(Vec2(), p1, p0);
         const delta = Vec2.sub(Vec2(), end, start);
         const axisScreenLength = Math.max(Vec2.magnitude(axisScreen), 1e-6);
-        return (delta[0] * axisScreen[0] + delta[1] * axisScreen[1]) / (axisScreenLength * axisScreenLength);
+        return scale * (delta[0] * axisScreen[0] + delta[1] * axisScreen[1]) / (axisScreenLength * axisScreenLength);
     }
 
     private projectRotationAngle(axis: Vec3, start: Vec2, end: Vec2) {
         const anchor = getCurrentAnchor(this.session!);
-        const screenAnchor = getScreenPoint(this.plugin, anchor);
+        const screenAnchor = toVec2(getCanvasClientPoint(this.plugin, anchor));
         const a = Vec2.sub(Vec2(), start, screenAnchor);
         const b = Vec2.sub(Vec2(), end, screenAnchor);
         const cross = a[0] * b[1] - a[1] * b[0];
@@ -355,7 +529,7 @@ export class StructureEditorController {
         toolbar.style.padding = '8px';
         toolbar.style.background = 'rgba(0, 0, 0, 0.65)';
         toolbar.style.borderRadius = '8px';
-        toolbar.style.zIndex = '5';
+        toolbar.style.zIndex = '20';
 
         const buttons = [
             ['Move', () => this.enterMode('move')],
@@ -375,6 +549,30 @@ export class StructureEditorController {
             toolbar.appendChild(button);
         }
 
+        const styles = document.createElement('div');
+        styles.style.display = 'flex';
+        styles.style.gap = '6px';
+        styles.style.marginLeft = '10px';
+
+        const styleButtons = [
+            ['Default', () => this.applyQuickStyle('default')],
+            ['Cartoon', () => this.applyQuickStyle('cartoon')],
+            ['Spacefill', () => this.applyQuickStyle('spacefill')],
+            ['Surface', () => this.applyQuickStyle('surface')],
+        ] as const;
+
+        for (const [label, action] of styleButtons) {
+            const button = document.createElement('button');
+            button.textContent = label;
+            button.style.border = 'none';
+            button.style.padding = '6px 10px';
+            button.style.borderRadius = '6px';
+            button.style.cursor = 'pointer';
+            button.addEventListener('click', () => void action());
+            styles.appendChild(button);
+        }
+        toolbar.appendChild(styles);
+
         host.style.position ||= 'relative';
         host.appendChild(toolbar);
         this.toolbar = toolbar;
@@ -390,6 +588,8 @@ export class StructureEditorController {
         if (!this.toolbar) return;
         const buttons = Array.from(this.toolbar.querySelectorAll('button'));
         const hasSession = !!this.session;
+        if (buttons[0]) (buttons[0] as HTMLButtonElement).disabled = hasSession && this.state.startsWith('dragging');
+        if (buttons[1]) (buttons[1] as HTMLButtonElement).disabled = hasSession && this.state.startsWith('dragging');
         if (buttons[2]) (buttons[2] as HTMLButtonElement).disabled = !hasSession;
         if (buttons[3]) (buttons[3] as HTMLButtonElement).disabled = !hasSession;
     }

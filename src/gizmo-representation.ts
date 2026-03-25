@@ -39,8 +39,8 @@ const AxisColors = [ColorNames.red, ColorNames.green, ColorNames.blue] as const;
 
 function addAxis(mesh: MeshBuilder.State, start: Vec3, end: Vec3, radius: number, group: number) {
     mesh.currentGroup = group;
-    addCylinder(mesh, start, end, 1, { radiusTop: radius, radiusBottom: radius, radialSegments: 20 });
-    addSphere(mesh, end, radius * 1.8, 1);
+    addCylinder(mesh, start, end, 1, { radiusTop: radius, radiusBottom: radius, radialSegments: 28 });
+    addSphere(mesh, end, radius * 2.1, 2);
 }
 
 function circleTransform(axis: Vec3, anchor: Vec3, radius: number) {
@@ -56,7 +56,7 @@ function circleTransform(axis: Vec3, anchor: Vec3, radius: number) {
 }
 
 function addRing(mesh: MeshBuilder.State, axis: Vec3, anchor: Vec3, radius: number, tubeRadius: number, group: number) {
-    const primitive = transformPrimitive(Circle({ radius: 1, segments: 48 }), circleTransform(axis, anchor, radius));
+    const primitive = transformPrimitive(Circle({ radius: 1, segments: 96 }), circleTransform(axis, anchor, radius));
     mesh.currentGroup = group;
     const { indices, vertices } = primitive;
     const a = Vec3.zero();
@@ -66,7 +66,7 @@ function addRing(mesh: MeshBuilder.State, axis: Vec3, anchor: Vec3, radius: numb
         const ib = indices[i + 1] * 3;
         Vec3.set(a, vertices[ia], vertices[ia + 1], vertices[ia + 2]);
         Vec3.set(b, vertices[ib], vertices[ib + 1], vertices[ib + 2]);
-        addCylinder(mesh, a, b, 1, { radiusTop: tubeRadius, radiusBottom: tubeRadius, radialSegments: 12 });
+        addCylinder(mesh, a, b, 1, { radiusTop: tubeRadius, radiusBottom: tubeRadius, radialSegments: 20 });
     }
 }
 
@@ -77,8 +77,8 @@ function createGizmoMesh(data: StructureEditorGizmoProps, oldMesh?: Mesh) {
     const anchor = Vec3.clone(data.anchor);
     const axisLength = data.scale;
     const ringRadius = data.scale * 0.9;
-    const axisRadius = Math.max(data.scale * 0.05, 0.05);
-    const ringRadiusTube = Math.max(data.scale * 0.03, 0.03);
+    const axisRadius = Math.max(data.scale * 0.06, 0.08);
+    const ringRadiusTube = Math.max(data.scale * 0.04, 0.05);
 
     addAxis(state, anchor, Vec3.add(Vec3(), anchor, Vec3.create(axisLength, 0, 0)), axisRadius, 0);
     addAxis(state, anchor, Vec3.add(Vec3(), anchor, Vec3.create(0, axisLength, 0)), axisRadius, 1);
@@ -89,7 +89,7 @@ function createGizmoMesh(data: StructureEditorGizmoProps, oldMesh?: Mesh) {
     addRing(state, Vec3.unitZ, anchor, ringRadius, ringRadiusTube, 5);
 
     state.currentGroup = 6;
-    addSphere(state, anchor, axisRadius * 2.2, 2);
+    addSphere(state, anchor, axisRadius * 2.5, 3);
 
     const mesh = MeshBuilder.getMesh(state);
     mesh.setBoundingSphere(Sphere3D.create(anchor, data.scale * 1.5));

@@ -5,7 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Mol* Structure Editor</title>
   <style>
-    html, body, #app { width: 100%; height: 100%; margin: 0; }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+    #app {
+      position: absolute;
+      inset: 0;
+    }
   </style>
 </head>
 <body>

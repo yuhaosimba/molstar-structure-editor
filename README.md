@@ -38,6 +38,8 @@ Then open:
 http://localhost:4173
 ```
 
+If the page appears to "twitch" or fully reload repeatedly, make sure you are not running a parallel watch process that writes into `dist/`. The example dev server is configured to ignore `dist/`, but a second watcher rebuilding the package can still create noisy reload behavior in some setups.
+
 ## Example Workflow
 
 1. Wait for the example structure to load.
