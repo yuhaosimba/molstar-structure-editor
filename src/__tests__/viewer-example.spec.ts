@@ -28,6 +28,16 @@ describe('viewer example', () => {
         expect(behaviorTs).not.toContain("['Rotate', () => this.enterMode('rotate')]");
     });
 
+    it('offers distance, angle, and dihedral tools in the editor toolbar', () => {
+        expect(behaviorTs).toContain('Distance');
+        expect(behaviorTs).toContain('Angle');
+        expect(behaviorTs).toContain('Dihedral');
+    });
+
+    it('renders a lock selector for constraint editing', () => {
+        expect(behaviorTs).toContain('Locked Atom');
+    });
+
     it('includes a local small-molecule ligand example for interaction testing', () => {
         expect(mainTs).toContain('benzene.mol');
         expect(mainTs).toContain('Ligand');

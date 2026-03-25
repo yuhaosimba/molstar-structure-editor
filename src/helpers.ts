@@ -20,6 +20,21 @@ export function enterRotateMode(plugin: PluginContext) {
     return StructureEditorCommands.EnterRotateMode(plugin, {});
 }
 
+export function enterDistanceMode(plugin: PluginContext) {
+    registerStructureEditor(plugin);
+    return StructureEditorCommands.EnterDistanceMode(plugin, {});
+}
+
+export function enterAngleMode(plugin: PluginContext) {
+    registerStructureEditor(plugin);
+    return StructureEditorCommands.EnterAngleMode(plugin, {});
+}
+
+export function enterDihedralMode(plugin: PluginContext) {
+    registerStructureEditor(plugin);
+    return StructureEditorCommands.EnterDihedralMode(plugin, {});
+}
+
 export function commitEdit(plugin: PluginContext) {
     registerStructureEditor(plugin);
     return StructureEditorCommands.CommitEdit(plugin, {});

@@ -1,4 +1,5 @@
 import { Subscription } from 'rxjs';
+import { OrderedSet } from 'molstar/lib/mol-data/int';
 import { StructureElement } from 'molstar/lib/mol-model/structure';
 import { PluginCommands } from 'molstar/lib/mol-plugin/commands';
 import { PluginContext } from 'molstar/lib/mol-plugin/context';
@@ -9,6 +10,7 @@ import { PluginConfig } from 'molstar/lib/mol-plugin/config';
 import { Binding } from 'molstar/lib/mol-util/binding';
 import { Mat4, Vec2, Vec3, Vec4 } from 'molstar/lib/mol-math/linear-algebra';
 import { StructureEditorCommands } from './commands';
+import { ConstraintEditSession, ConstraintKind, cancelConstraintSession, commitConstraintSession, createConstraintEditSession } from './constraint-session';
 import { CoordinateUpdater } from './coordinate-updater';
 import { getClosestPolylineSegment, Point as ScreenPoint, pickGizmoHandleAtPoint } from './gizmo-hit-test';
 import { GizmoHandleId, StructureEditorGizmo3D } from './gizmo-representation';
@@ -29,6 +31,19 @@ type TrackballBindings = NonNullable<NonNullable<PluginContext['canvas3d']>['att
 type DragOperation = {
     handle: GizmoHandleId
     kind: EditKind
+};
+
+type ConstraintPanelElements = {
+    root: HTMLDivElement
+    title: HTMLHeadingElement
+    summary: HTMLParagraphElement
+    original: HTMLParagraphElement
+    lockLabel: HTMLLabelElement
+    lockSelect: HTMLSelectElement
+    input: HTMLInputElement
+    slider: HTMLInputElement
+    apply: HTMLButtonElement
+    cancel: HTMLButtonElement
 };
 
 type Point2 = [number, number];
@@ -59,6 +74,14 @@ function showToast(plugin: PluginContext, title: string, message: string, timeou
 
 function getSelectionEntry(plugin: PluginContext) {
     return getSingleSelectionEntry(plugin.managers.structure.selection.entries);
+}
+
+function resolveStructureRefsForModel(plugin: PluginContext, modelId: string) {
+    const hierarchyStructure = plugin.managers.structure.hierarchy.current.structures.find((current: any) => current.model?.cell?.obj?.data?.id === modelId);
+    const modelRef = hierarchyStructure?.model?.cell?.transform?.ref;
+    const sourceStructureRef = hierarchyStructure?.cell?.transform?.ref;
+    if (!modelRef || !sourceStructureRef) return void 0;
+    return { modelRef, sourceStructureRef };
 }
 
 function cloneBindings(bindings: TrackballBindings): TrackballBindings {
@@ -106,6 +129,45 @@ function getHandleAxis(handle: GizmoHandleId) {
     if (handle.endsWith('x')) return Vec3.unitX;
     if (handle.endsWith('y')) return Vec3.unitY;
     return Vec3.unitZ;
+}
+
+function getConstraintTargetCount(kind: ConstraintKind) {
+    if (kind === 'distance') return 2;
+    if (kind === 'angle') return 3;
+    return 4;
+}
+
+function getConstraintTitle(kind: ConstraintKind) {
+    if (kind === 'distance') return 'Edit Distance';
+    if (kind === 'angle') return 'Edit Angle';
+    return 'Edit Dihedral';
+}
+
+function formatConstraintValue(kind: ConstraintKind, value: number) {
+    const suffix = kind === 'distance' ? 'Å' : '°';
+    return `${value.toFixed(2)} ${suffix}`;
+}
+
+function getConstraintRange(kind: ConstraintKind, value: number) {
+    if (kind === 'distance') {
+        return {
+            min: 0.1,
+            max: Math.max(10, value * 2),
+            step: 0.01,
+        };
+    }
+    if (kind === 'angle') {
+        return { min: 1, max: 179, step: 0.1 };
+    }
+    return { min: -180, max: 180, step: 0.1 };
+}
+
+function getFirstAtomicIndex(loci: StructureElement.Loci) {
+    const first = loci.elements[0];
+    if (!first) return void 0;
+    const index = OrderedSet.getAt(first.indices, 0);
+    if (index === void 0) return void 0;
+    return first.unit.elements[index];
 }
 
 function getRingBasis(axis: Vec3): [Vec3, Vec3] {
@@ -158,8 +220,11 @@ export class StructureEditorController {
     private gizmoRef: string | undefined = void 0;
     private toolbar: HTMLDivElement | undefined = void 0;
     private session: EditSession | undefined = void 0;
+    private constraintSession: ConstraintEditSession | undefined = void 0;
     private sessionModelRef: string | undefined = void 0;
     private state: EditState = 'idle';
+    private constraintMode: ConstraintKind | undefined = void 0;
+    private constraintAtomIndices: number[] = [];
     private dragOperation: DragOperation | undefined = void 0;
     private dragPointerId: number | undefined = void 0;
     private dragLastPoint: Point2 | undefined = void 0;
@@ -171,12 +236,16 @@ export class StructureEditorController {
     private lastPickedLoci: StructureElement.Loci | undefined = void 0;
     private sourceStructureRef: string | undefined = void 0;
     private previewStructureRef: string | undefined = void 0;
+    private constraintPanel: ConstraintPanelElements | undefined = void 0;
 
     constructor(private readonly plugin: PluginContext, private readonly options: Required<StructureEditorOptions>) {
         this.updater = new CoordinateUpdater(plugin);
         this.subs.push(
             StructureEditorCommands.EnterMoveMode.subscribe(plugin, () => this.enterTransformMode()),
             StructureEditorCommands.EnterRotateMode.subscribe(plugin, () => this.enterTransformMode()),
+            StructureEditorCommands.EnterDistanceMode.subscribe(plugin, () => this.enterConstraintMode('distance')),
+            StructureEditorCommands.EnterAngleMode.subscribe(plugin, () => this.enterConstraintMode('angle')),
+            StructureEditorCommands.EnterDihedralMode.subscribe(plugin, () => this.enterConstraintMode('dihedral')),
             StructureEditorCommands.CommitEdit.subscribe(plugin, () => this.commit()),
             StructureEditorCommands.CancelEdit.subscribe(plugin, () => this.cancel()),
             plugin.behaviors.interaction.click.subscribe(event => this.onClick(event)),
@@ -189,6 +258,7 @@ export class StructureEditorController {
     dispose() {
         for (const sub of this.subs) sub.unsubscribe();
         this.destroyToolbar();
+        this.destroyConstraintPanel();
         this.detachPointerEvents();
         void this.hideGizmo();
         this.restoreInteractivity();
@@ -196,6 +266,13 @@ export class StructureEditorController {
 
     async enterTransformMode() {
         try {
+            if (this.constraintMode && !this.constraintSession) {
+                this.resetConstraintSelection();
+            }
+            if (this.hasActiveEditSession()) {
+                showToast(this.plugin, 'Structure Editor', 'Finish or cancel the current edit before starting another one.');
+                return;
+            }
             const selectedEntry = getSelectionEntry(this.plugin);
             const entry = selectedEntry?.entry as any;
             const selection = (entry?.selection ?? entry?._selection) as any;
@@ -251,9 +328,32 @@ export class StructureEditorController {
         }
     }
 
+    enterConstraintMode(kind: ConstraintKind) {
+        if (this.hasActiveEditSession()) {
+            showToast(this.plugin, 'Structure Editor', 'Finish or cancel the current edit before starting another one.');
+            return;
+        }
+        this.constraintMode = kind;
+        this.constraintAtomIndices = [];
+        this.sessionModelRef = void 0;
+        this.sourceStructureRef = void 0;
+        this.previewStructureRef = void 0;
+        this.previousSelectionMode = this.plugin.selectionMode;
+        this.plugin.selectionMode = true;
+        void this.hideGizmo();
+        this.destroyConstraintPanel();
+        showToast(this.plugin, 'Structure Editor', `Select ${getConstraintTargetCount(kind)} atoms for ${getConstraintTitle(kind).toLowerCase()}.`);
+        this.syncToolbar();
+    }
+
     async commit() {
-        if (!this.session) return;
-        commitSession(this.session);
+        if (this.constraintSession) {
+            commitConstraintSession(this.constraintSession);
+        } else if (this.session) {
+            commitSession(this.session);
+        } else {
+            return;
+        }
         await this.pushFrame();
         if (this.sourceStructureRef) {
             await this.plugin.build().delete(this.sourceStructureRef).commit();
@@ -264,11 +364,25 @@ export class StructureEditorController {
     }
 
     async cancel() {
-        if (!this.session) return;
-        cancelSession(this.session);
-        await this.pushFrame();
-        await this.cleanupEditableStructure(true);
-        this.finishSession('cancelled');
+        if (this.constraintSession) {
+            cancelConstraintSession(this.constraintSession);
+            await this.pushFrame();
+            await this.cleanupEditableStructure(true);
+            this.finishSession('cancelled');
+            return;
+        }
+        if (this.session) {
+            cancelSession(this.session);
+            await this.pushFrame();
+            await this.cleanupEditableStructure(true);
+            this.finishSession('cancelled');
+            return;
+        }
+        if (this.constraintMode) {
+            this.resetConstraintSelection();
+            this.setState('idle');
+            this.restoreInteractivity();
+        }
     }
 
     private finishSession(state: EditState) {
@@ -280,6 +394,10 @@ export class StructureEditorController {
         this.detachPointerEvents();
         this.restoreInteractivity();
         this.session = void 0;
+        this.constraintSession = void 0;
+        this.constraintMode = void 0;
+        this.constraintAtomIndices = [];
+        this.destroyConstraintPanel();
         this.sessionModelRef = void 0;
         this.sourceStructureRef = void 0;
         this.previewStructureRef = void 0;
@@ -306,9 +424,11 @@ export class StructureEditorController {
     }
 
     private async pushFrame() {
-        if (!this.session || !this.sessionModelRef) return;
-        this.updater.schedule(this.sessionModelRef, this.session.currentFrame);
-        await this.showGizmo();
+        if (!this.sessionModelRef) return;
+        const frame = this.session?.currentFrame ?? this.constraintSession?.currentFrame;
+        if (!frame) return;
+        this.updater.schedule(this.sessionModelRef, frame);
+        if (this.session) await this.showGizmo();
     }
 
     private async showEditableStructure(sourceStructureRef: string, coordinateModelRef: string) {
@@ -339,6 +459,10 @@ export class StructureEditorController {
             this.pendingFrame = false;
             void this.pushFrame();
         });
+    }
+
+    private hasActiveEditSession() {
+        return !!this.session || !!this.constraintSession;
     }
 
     private getGizmoScale() {
@@ -497,6 +621,9 @@ export class StructureEditorController {
         const loci = event.current?.loci as StructureElement.Loci | undefined;
         if (loci?.kind === 'element-loci' && loci.elements.length > 0 && loci.structure?.model?.id) {
             this.lastPickedLoci = loci;
+            if (this.constraintMode && !this.constraintSession) {
+                void this.collectConstraintAtom(loci);
+            }
         }
     }
 
@@ -553,6 +680,9 @@ export class StructureEditorController {
 
         const buttons = [
             ['Transform', () => this.enterTransformMode()],
+            ['Distance', () => this.enterConstraintMode('distance')],
+            ['Angle', () => this.enterConstraintMode('angle')],
+            ['Dihedral', () => this.enterConstraintMode('dihedral')],
             ['Apply', () => this.commit()],
             ['Cancel', () => this.cancel()],
         ] as const;
@@ -607,10 +737,222 @@ export class StructureEditorController {
     private syncToolbar() {
         if (!this.toolbar) return;
         const buttons = Array.from(this.toolbar.querySelectorAll('button'));
-        const hasSession = !!this.session;
-        if (buttons[0]) (buttons[0] as HTMLButtonElement).disabled = hasSession && this.state.startsWith('dragging');
-        if (buttons[1]) (buttons[1] as HTMLButtonElement).disabled = !hasSession;
-        if (buttons[2]) (buttons[2] as HTMLButtonElement).disabled = !hasSession;
+        const hasSession = this.hasActiveEditSession();
+        const hasPendingConstraintSelection = !!this.constraintMode && !this.constraintSession;
+        if (buttons[0]) (buttons[0] as HTMLButtonElement).disabled = hasSession || hasPendingConstraintSelection;
+        if (buttons[1]) (buttons[1] as HTMLButtonElement).disabled = hasSession || hasPendingConstraintSelection;
+        if (buttons[2]) (buttons[2] as HTMLButtonElement).disabled = hasSession || hasPendingConstraintSelection;
+        if (buttons[3]) (buttons[3] as HTMLButtonElement).disabled = hasSession || hasPendingConstraintSelection;
+        if (buttons[4]) (buttons[4] as HTMLButtonElement).disabled = !hasSession;
+        if (buttons[5]) (buttons[5] as HTMLButtonElement).disabled = !hasSession && !hasPendingConstraintSelection;
+    }
+
+    private resetConstraintSelection() {
+        this.constraintMode = void 0;
+        this.constraintAtomIndices = [];
+        this.sessionModelRef = void 0;
+        this.sourceStructureRef = void 0;
+        this.previewStructureRef = void 0;
+        this.destroyConstraintPanel();
+        this.syncToolbar();
+    }
+
+    private async collectConstraintAtom(loci: StructureElement.Loci) {
+        if (!this.constraintMode) return;
+        const atomIndex = getFirstAtomicIndex(loci);
+        if (atomIndex === void 0) {
+            showToast(this.plugin, 'Structure Editor', 'Pick a single atomic position for constraint editing.');
+            return;
+        }
+        const model = loci.structure.model;
+        const refs = resolveStructureRefsForModel(this.plugin, model.id);
+        if (!refs) {
+            showToast(this.plugin, 'Structure Editor', 'Could not resolve the selected structure.');
+            return;
+        }
+        if (this.sessionModelRef && this.sessionModelRef !== refs.modelRef) {
+            showToast(this.plugin, 'Structure Editor', 'Constraint editing must use atoms from the same structure.');
+            return;
+        }
+        if (this.constraintAtomIndices.includes(atomIndex)) {
+            showToast(this.plugin, 'Structure Editor', 'This atom is already part of the current constraint.');
+            return;
+        }
+
+        this.sessionModelRef = refs.modelRef;
+        this.sourceStructureRef = refs.sourceStructureRef;
+        this.constraintAtomIndices.push(atomIndex);
+
+        const targetCount = getConstraintTargetCount(this.constraintMode);
+        if (this.constraintAtomIndices.length < targetCount) {
+            showToast(this.plugin, 'Structure Editor', `Picked ${this.constraintAtomIndices.length}/${targetCount} atoms for ${getConstraintTitle(this.constraintMode).toLowerCase()}.`);
+            this.syncToolbar();
+            return;
+        }
+
+        this.constraintSession = createConstraintEditSession({
+            kind: this.constraintMode,
+            model,
+            atomIndices: this.constraintAtomIndices as any,
+        });
+        const coordinateNode = await this.updater.updateNow(this.sessionModelRef, this.constraintSession.currentFrame);
+        await this.showEditableStructure(this.sourceStructureRef!, coordinateNode.ref);
+        this.mountConstraintPanel();
+        this.syncConstraintPanel();
+        this.syncToolbar();
+    }
+
+    private mountConstraintPanel() {
+        if (this.constraintPanel || !this.constraintSession) return;
+        const host = this.plugin.canvas3dContext?.canvas?.parentElement;
+        if (!host) return;
+
+        const root = document.createElement('div');
+        root.style.position = 'absolute';
+        root.style.top = '72px';
+        root.style.right = '12px';
+        root.style.width = '280px';
+        root.style.padding = '16px';
+        root.style.background = 'rgba(33, 33, 33, 0.92)';
+        root.style.borderRadius = '12px';
+        root.style.color = '#fff';
+        root.style.zIndex = '30';
+        root.style.display = 'flex';
+        root.style.flexDirection = 'column';
+        root.style.gap = '12px';
+
+        const title = document.createElement('h3');
+        title.style.margin = '0';
+        title.style.fontSize = '16px';
+
+        const summary = document.createElement('p');
+        summary.style.margin = '0';
+        summary.style.color = 'rgba(255,255,255,0.8)';
+        summary.style.fontSize = '12px';
+
+        const original = document.createElement('p');
+        original.style.margin = '0';
+        original.style.fontSize = '13px';
+
+        const lockLabel = document.createElement('label');
+        lockLabel.textContent = 'Locked Atom';
+        lockLabel.style.display = 'flex';
+        lockLabel.style.flexDirection = 'column';
+        lockLabel.style.gap = '6px';
+        lockLabel.style.fontSize = '12px';
+        lockLabel.style.color = 'rgba(255,255,255,0.9)';
+
+        const lockSelect = document.createElement('select');
+        lockSelect.style.padding = '8px';
+        lockSelect.style.borderRadius = '6px';
+        lockSelect.style.border = '1px solid rgba(255,255,255,0.2)';
+        lockSelect.style.background = 'rgba(255,255,255,0.08)';
+        lockSelect.style.color = '#fff';
+        lockSelect.addEventListener('change', () => this.changeLockedAtom(Number(lockSelect.value)));
+        lockLabel.appendChild(lockSelect);
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.addEventListener('input', () => this.applyConstraintValue(Number(slider.value), 'slider'));
+
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.style.padding = '8px';
+        input.style.borderRadius = '6px';
+        input.style.border = '1px solid rgba(255,255,255,0.2)';
+        input.style.background = 'rgba(255,255,255,0.08)';
+        input.style.color = '#fff';
+        input.addEventListener('input', () => this.applyConstraintValue(Number(input.value), 'input'));
+
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.gap = '8px';
+
+        const apply = document.createElement('button');
+        apply.textContent = 'Apply';
+        apply.style.padding = '8px 10px';
+        apply.style.border = 'none';
+        apply.style.borderRadius = '6px';
+        apply.style.cursor = 'pointer';
+        apply.addEventListener('click', () => void this.commit());
+
+        const cancel = document.createElement('button');
+        cancel.textContent = 'Cancel';
+        cancel.style.padding = '8px 10px';
+        cancel.style.border = 'none';
+        cancel.style.borderRadius = '6px';
+        cancel.style.cursor = 'pointer';
+        cancel.addEventListener('click', () => void this.cancel());
+
+        actions.append(cancel, apply);
+
+        root.append(title, summary, original, lockLabel, slider, input, actions);
+        host.style.position ||= 'relative';
+        host.appendChild(root);
+
+        this.constraintPanel = { root, title, summary, original, lockLabel, lockSelect, input, slider, apply, cancel };
+    }
+
+    private destroyConstraintPanel() {
+        this.constraintPanel?.root.remove();
+        this.constraintPanel = void 0;
+    }
+
+    private syncConstraintPanel() {
+        if (!this.constraintSession || !this.constraintPanel) return;
+        const { kind, atomIndices, originalValue, currentValue, anchorAtomIndices, movableAtomIndices } = this.constraintSession;
+        const range = getConstraintRange(kind, Math.max(Math.abs(originalValue), Math.abs(currentValue)));
+        this.constraintPanel.title.textContent = getConstraintTitle(kind);
+        this.constraintPanel.summary.textContent = `Locked atoms: ${anchorAtomIndices.map(i => `#${i}`).join(', ')} | Movable: ${movableAtomIndices.map(i => `#${i}`).join(', ')}`;
+        this.constraintPanel.original.textContent = `Atoms ${atomIndices.join(' - ')} | Original: ${formatConstraintValue(kind, originalValue)} | Current: ${formatConstraintValue(kind, currentValue)}`;
+        this.constraintPanel.lockSelect.innerHTML = '';
+        for (const atomIndex of this.constraintSession.allowedLockedAtomIndices) {
+            const option = document.createElement('option');
+            option.value = String(atomIndex);
+            option.textContent = `#${atomIndex}`;
+            option.selected = atomIndex === this.constraintSession.lockedAtomIndex;
+            this.constraintPanel.lockSelect.appendChild(option);
+        }
+        this.constraintPanel.slider.min = String(range.min);
+        this.constraintPanel.slider.max = String(range.max);
+        this.constraintPanel.slider.step = String(range.step);
+        this.constraintPanel.slider.value = String(currentValue);
+        this.constraintPanel.input.min = String(range.min);
+        this.constraintPanel.input.max = String(range.max);
+        this.constraintPanel.input.step = String(range.step);
+        this.constraintPanel.input.value = currentValue.toFixed(2);
+    }
+
+    private applyConstraintValue(value: number, source: 'slider' | 'input') {
+        if (!this.constraintSession || !Number.isFinite(value)) return;
+        try {
+            this.constraintSession.update(value);
+            this.syncConstraintPanel();
+            if (source === 'slider' && this.constraintPanel) {
+                this.constraintPanel.input.value = this.constraintSession.currentValue.toFixed(2);
+            }
+            if (source === 'input' && this.constraintPanel) {
+                this.constraintPanel.slider.value = String(this.constraintSession.currentValue);
+            }
+            this.scheduleFrame();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to apply the constraint value.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.syncConstraintPanel();
+        }
+    }
+
+    private changeLockedAtom(atomIndex: number) {
+        if (!this.constraintSession || !Number.isFinite(atomIndex)) return;
+        try {
+            this.constraintSession.setLockedAtomIndex(atomIndex);
+            this.syncConstraintPanel();
+            this.scheduleFrame();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update the locked atom.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.syncConstraintPanel();
+        }
     }
 }
 

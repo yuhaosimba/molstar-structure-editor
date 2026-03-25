@@ -94,7 +94,7 @@ async function bootstrap() {
     };
 
     mountSampleBar();
-    await loadSample('protein');
+    await loadSample('ligand');
 }
 
 void bootstrap();

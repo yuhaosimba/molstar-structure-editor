@@ -3,6 +3,9 @@ import {
     cancelEdit,
     commitEdit,
     enableStructureEditing,
+    enterAngleMode,
+    enterDihedralMode,
+    enterDistanceMode,
     enterMoveMode,
     enterRotateMode,
     registerStructureEditor,
@@ -14,6 +17,9 @@ describe('public api', () => {
         expect(typeof enableStructureEditing).toBe('function');
         expect(typeof enterMoveMode).toBe('function');
         expect(typeof enterRotateMode).toBe('function');
+        expect(typeof enterDistanceMode).toBe('function');
+        expect(typeof enterAngleMode).toBe('function');
+        expect(typeof enterDihedralMode).toBe('function');
         expect(typeof commitEdit).toBe('function');
         expect(typeof cancelEdit).toBe('function');
     });
