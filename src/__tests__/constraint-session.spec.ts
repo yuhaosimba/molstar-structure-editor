@@ -207,6 +207,22 @@ describe('constraint edit sessions', () => {
         expect(session.movableAtomIndices).toEqual([1]);
     });
 
+    it('uses terminal atom in dihedral atom scope instead of the axis atom', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'dihedral',
+            model,
+            structure: createStructure(model, 4, [[0, 1], [1, 2], [2, 3]]),
+            atomIndices: [0, 1, 2, 3],
+            moveScope: 'atom',
+        });
+
+        expect(session.movableAtomIndices).toEqual([3]);
+        session.update(90);
+        expect(session.currentFrame.z[3]).not.toBeCloseTo(0, 5);
+        expect(session.currentFrame.z[2]).toBeCloseTo(0, 5);
+    });
+
     it('throws when selected atoms do not define the expected bonded path', () => {
         const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
         expect(() => createConstraintEditSession({

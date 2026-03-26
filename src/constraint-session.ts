@@ -96,7 +96,8 @@ type ConstraintResolution = {
     resolvedAtomIndices: ConstraintEditSession['atomIndices']
     anchorAtomIndices: number[]
     cutBond: [number, number]
-    movableSeedAtomIndex: number
+    movableFragmentSeedAtomIndex: number
+    movableAtomIndex: number
 };
 
 function getResolvedConstraint(kind: ConstraintKind, atomIndices: ConstraintEditSession['atomIndices'], lockedAtomIndex: number): ConstraintResolution {
@@ -106,14 +107,16 @@ function getResolvedConstraint(kind: ConstraintKind, atomIndices: ConstraintEdit
                 resolvedAtomIndices: atomIndices as [number, number],
                 anchorAtomIndices: [atomIndices[0] as number],
                 cutBond: [atomIndices[0] as number, atomIndices[1] as number],
-                movableSeedAtomIndex: atomIndices[1] as number,
+                movableFragmentSeedAtomIndex: atomIndices[1] as number,
+                movableAtomIndex: atomIndices[1] as number,
             };
         }
         return {
             resolvedAtomIndices: [atomIndices[1] as number, atomIndices[0] as number] as [number, number],
             anchorAtomIndices: [atomIndices[1] as number],
             cutBond: [atomIndices[0] as number, atomIndices[1] as number],
-            movableSeedAtomIndex: atomIndices[0] as number,
+            movableFragmentSeedAtomIndex: atomIndices[0] as number,
+            movableAtomIndex: atomIndices[0] as number,
         };
     }
 
@@ -123,14 +126,16 @@ function getResolvedConstraint(kind: ConstraintKind, atomIndices: ConstraintEdit
                 resolvedAtomIndices: atomIndices as [number, number, number],
                 anchorAtomIndices: [atomIndices[0] as number, atomIndices[1] as number],
                 cutBond: [atomIndices[1] as number, atomIndices[2] as number],
-                movableSeedAtomIndex: atomIndices[2] as number,
+                movableFragmentSeedAtomIndex: atomIndices[2] as number,
+                movableAtomIndex: atomIndices[2] as number,
             };
         }
         return {
             resolvedAtomIndices: [atomIndices[2] as number, atomIndices[1] as number, atomIndices[0] as number] as [number, number, number],
             anchorAtomIndices: [atomIndices[1] as number, atomIndices[2] as number],
             cutBond: [atomIndices[0] as number, atomIndices[1] as number],
-            movableSeedAtomIndex: atomIndices[0] as number,
+            movableFragmentSeedAtomIndex: atomIndices[0] as number,
+            movableAtomIndex: atomIndices[0] as number,
         };
     }
 
@@ -139,14 +144,16 @@ function getResolvedConstraint(kind: ConstraintKind, atomIndices: ConstraintEdit
             resolvedAtomIndices: atomIndices as [number, number, number, number],
             anchorAtomIndices: [atomIndices[0] as number, atomIndices[1] as number, atomIndices[2] as number],
             cutBond: [atomIndices[1] as number, atomIndices[2] as number],
-            movableSeedAtomIndex: atomIndices[2] as number,
+            movableFragmentSeedAtomIndex: atomIndices[2] as number,
+            movableAtomIndex: atomIndices[3] as number,
         };
     }
     return {
         resolvedAtomIndices: [atomIndices[3] as number, atomIndices[2] as number, atomIndices[1] as number, atomIndices[0] as number] as [number, number, number, number],
         anchorAtomIndices: [atomIndices[1] as number, atomIndices[2] as number, atomIndices[3] as number],
         cutBond: [atomIndices[1] as number, atomIndices[2] as number],
-        movableSeedAtomIndex: atomIndices[1] as number,
+        movableFragmentSeedAtomIndex: atomIndices[1] as number,
+        movableAtomIndex: atomIndices[0] as number,
     };
 }
 
@@ -248,7 +255,7 @@ function resolveMovableFragmentAtoms(adjacency: Map<number, Set<number>>, kind: 
         throw new Error('The selected atoms do not define a valid center bond for this constraint.');
     }
 
-    const movableAtoms = collectComponentAtoms(adjacency, resolved.movableSeedAtomIndex, resolved.cutBond);
+    const movableAtoms = collectComponentAtoms(adjacency, resolved.movableFragmentSeedAtomIndex, resolved.cutBond);
     if (movableAtoms.includes(cutA) && movableAtoms.includes(cutB)) {
         throw new Error('The selected bond does not split the molecular graph into movable fragments.');
     }
@@ -284,7 +291,7 @@ function resolveMovableAtoms(
         return {
             resolvedAtomIndices: resolved.resolvedAtomIndices,
             anchorAtomIndices: resolved.anchorAtomIndices,
-            movableAtomIndices: [resolved.movableSeedAtomIndex],
+            movableAtomIndices: [resolved.movableAtomIndex],
         };
     }
     return resolveMovableFragmentAtoms(adjacency, kind, atomIndices, lockedAtomIndex);
