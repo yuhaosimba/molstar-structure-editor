@@ -48,6 +48,19 @@ describe('constraint geometry updates', () => {
         expect(frame.x[0]).toBeCloseTo(0, 5);
     });
 
+    it('applies a distance constraint to all movable atoms in the fragment', () => {
+        const frame = createFrame([
+            [0, 0, 0],
+            [1, 0, 0],
+            [2, 0, 0],
+        ]);
+
+        applyDistanceConstraint(frame, [0, 1], [1, 2], 2);
+
+        expect(frame.x[1]).toBeCloseTo(2, 5);
+        expect(frame.x[2]).toBeCloseTo(3, 5);
+    });
+
     it('applies an angle constraint by rotating the last atom around the center', () => {
         const frame = createFrame([
             [0, 0, 0],

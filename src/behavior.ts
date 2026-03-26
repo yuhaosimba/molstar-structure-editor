@@ -10,7 +10,7 @@ import { PluginConfig } from 'molstar/lib/mol-plugin/config';
 import { Binding } from 'molstar/lib/mol-util/binding';
 import { Mat4, Vec2, Vec3, Vec4 } from 'molstar/lib/mol-math/linear-algebra';
 import { StructureEditorCommands } from './commands';
-import { ConstraintEditSession, ConstraintKind, cancelConstraintSession, commitConstraintSession, createConstraintEditSession } from './constraint-session';
+import { ConstraintEditSession, ConstraintKind, ConstraintMoveScope, cancelConstraintSession, commitConstraintSession, createConstraintEditSession } from './constraint-session';
 import { CoordinateUpdater } from './coordinate-updater';
 import { getClosestPolylineSegment, Point as ScreenPoint, pickGizmoHandleAtPoint } from './gizmo-hit-test';
 import { GizmoHandleId, StructureEditorGizmo3D } from './gizmo-representation';
@@ -38,6 +38,8 @@ type ConstraintPanelElements = {
     title: HTMLHeadingElement
     summary: HTMLParagraphElement
     original: HTMLParagraphElement
+    scopeLabel: HTMLLabelElement
+    scopeSelect: HTMLSelectElement
     lockLabel: HTMLLabelElement
     lockSelect: HTMLSelectElement
     input: HTMLInputElement
@@ -758,48 +760,63 @@ export class StructureEditorController {
     }
 
     private async collectConstraintAtom(loci: StructureElement.Loci) {
-        if (!this.constraintMode) return;
-        const atomIndex = getFirstAtomicIndex(loci);
-        if (atomIndex === void 0) {
-            showToast(this.plugin, 'Structure Editor', 'Pick a single atomic position for constraint editing.');
-            return;
-        }
-        const model = loci.structure.model;
-        const refs = resolveStructureRefsForModel(this.plugin, model.id);
-        if (!refs) {
-            showToast(this.plugin, 'Structure Editor', 'Could not resolve the selected structure.');
-            return;
-        }
-        if (this.sessionModelRef && this.sessionModelRef !== refs.modelRef) {
-            showToast(this.plugin, 'Structure Editor', 'Constraint editing must use atoms from the same structure.');
-            return;
-        }
-        if (this.constraintAtomIndices.includes(atomIndex)) {
-            showToast(this.plugin, 'Structure Editor', 'This atom is already part of the current constraint.');
-            return;
-        }
+        try {
+            if (!this.constraintMode) return;
+            if (!loci.elements.every(e => Mat4.isIdentity(e.unit.conformation.operator.matrix))) {
+                showToast(this.plugin, 'Structure Editor', 'Selections on transformed assembly copies are not supported in v1.');
+                return;
+            }
+            const atomIndex = getFirstAtomicIndex(loci);
+            if (atomIndex === void 0) {
+                showToast(this.plugin, 'Structure Editor', 'Pick a single atomic position for constraint editing.');
+                return;
+            }
+            const model = loci.structure.model;
+            const structure = loci.structure;
+            const refs = resolveStructureRefsForModel(this.plugin, model.id);
+            if (!refs) {
+                showToast(this.plugin, 'Structure Editor', 'Could not resolve the selected structure.');
+                return;
+            }
+            if (this.sessionModelRef && this.sessionModelRef !== refs.modelRef) {
+                showToast(this.plugin, 'Structure Editor', 'Constraint editing must use atoms from the same structure.');
+                return;
+            }
+            if (this.constraintAtomIndices.includes(atomIndex)) {
+                showToast(this.plugin, 'Structure Editor', 'This atom is already part of the current constraint.');
+                return;
+            }
 
-        this.sessionModelRef = refs.modelRef;
-        this.sourceStructureRef = refs.sourceStructureRef;
-        this.constraintAtomIndices.push(atomIndex);
+            this.sessionModelRef = refs.modelRef;
+            this.sourceStructureRef = refs.sourceStructureRef;
+            this.constraintAtomIndices.push(atomIndex);
 
-        const targetCount = getConstraintTargetCount(this.constraintMode);
-        if (this.constraintAtomIndices.length < targetCount) {
-            showToast(this.plugin, 'Structure Editor', `Picked ${this.constraintAtomIndices.length}/${targetCount} atoms for ${getConstraintTitle(this.constraintMode).toLowerCase()}.`);
+            const targetCount = getConstraintTargetCount(this.constraintMode);
+            if (this.constraintAtomIndices.length < targetCount) {
+                showToast(this.plugin, 'Structure Editor', `Picked ${this.constraintAtomIndices.length}/${targetCount} atoms for ${getConstraintTitle(this.constraintMode).toLowerCase()}.`);
+                this.syncToolbar();
+                return;
+            }
+
+            this.constraintSession = createConstraintEditSession({
+                kind: this.constraintMode,
+                model,
+                structure,
+                atomIndices: this.constraintAtomIndices as any,
+            });
+            const coordinateNode = await this.updater.updateNow(this.sessionModelRef, this.constraintSession.currentFrame);
+            await this.showEditableStructure(this.sourceStructureRef!, coordinateNode.ref);
+            this.mountConstraintPanel();
+            this.syncConstraintPanel();
             this.syncToolbar();
-            return;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to start the constraint edit session.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.constraintSession = void 0;
+            this.destroyConstraintPanel();
+            this.constraintAtomIndices = [];
+            this.syncToolbar();
         }
-
-        this.constraintSession = createConstraintEditSession({
-            kind: this.constraintMode,
-            model,
-            atomIndices: this.constraintAtomIndices as any,
-        });
-        const coordinateNode = await this.updater.updateNow(this.sessionModelRef, this.constraintSession.currentFrame);
-        await this.showEditableStructure(this.sourceStructureRef!, coordinateNode.ref);
-        this.mountConstraintPanel();
-        this.syncConstraintPanel();
-        this.syncToolbar();
     }
 
     private mountConstraintPanel() {
@@ -833,6 +850,23 @@ export class StructureEditorController {
         const original = document.createElement('p');
         original.style.margin = '0';
         original.style.fontSize = '13px';
+
+        const scopeLabel = document.createElement('label');
+        scopeLabel.textContent = 'Move Scope';
+        scopeLabel.style.display = 'flex';
+        scopeLabel.style.flexDirection = 'column';
+        scopeLabel.style.gap = '6px';
+        scopeLabel.style.fontSize = '12px';
+        scopeLabel.style.color = 'rgba(255,255,255,0.9)';
+
+        const scopeSelect = document.createElement('select');
+        scopeSelect.style.padding = '8px';
+        scopeSelect.style.borderRadius = '6px';
+        scopeSelect.style.border = '1px solid rgba(255,255,255,0.2)';
+        scopeSelect.style.background = 'rgba(255,255,255,0.08)';
+        scopeSelect.style.color = '#fff';
+        scopeSelect.addEventListener('change', () => this.changeMoveScope(scopeSelect.value as ConstraintMoveScope));
+        scopeLabel.appendChild(scopeSelect);
 
         const lockLabel = document.createElement('label');
         lockLabel.textContent = 'Locked Atom';
@@ -886,11 +920,11 @@ export class StructureEditorController {
 
         actions.append(cancel, apply);
 
-        root.append(title, summary, original, lockLabel, slider, input, actions);
+        root.append(title, summary, original, scopeLabel, lockLabel, slider, input, actions);
         host.style.position ||= 'relative';
         host.appendChild(root);
 
-        this.constraintPanel = { root, title, summary, original, lockLabel, lockSelect, input, slider, apply, cancel };
+        this.constraintPanel = { root, title, summary, original, scopeLabel, scopeSelect, lockLabel, lockSelect, input, slider, apply, cancel };
     }
 
     private destroyConstraintPanel() {
@@ -903,8 +937,21 @@ export class StructureEditorController {
         const { kind, atomIndices, originalValue, currentValue, anchorAtomIndices, movableAtomIndices } = this.constraintSession;
         const range = getConstraintRange(kind, Math.max(Math.abs(originalValue), Math.abs(currentValue)));
         this.constraintPanel.title.textContent = getConstraintTitle(kind);
-        this.constraintPanel.summary.textContent = `Locked atoms: ${anchorAtomIndices.map(i => `#${i}`).join(', ')} | Movable: ${movableAtomIndices.map(i => `#${i}`).join(', ')}`;
+        const movablePreview = movableAtomIndices.slice(0, 6).map(i => `#${i}`).join(', ');
+        const movableSuffix = movableAtomIndices.length > 6 ? ', ...' : '';
+        const movableLabel = this.constraintSession.moveScope === 'fragment' ? 'Movable fragment atoms' : 'Movable atoms';
+        this.constraintPanel.summary.textContent = `Locked side atoms: ${anchorAtomIndices.length} | ${movableLabel}: ${movableAtomIndices.length}${movablePreview ? ` (${movablePreview}${movableSuffix})` : ''}`;
         this.constraintPanel.original.textContent = `Atoms ${atomIndices.join(' - ')} | Original: ${formatConstraintValue(kind, originalValue)} | Current: ${formatConstraintValue(kind, currentValue)}`;
+        this.constraintPanel.scopeSelect.innerHTML = '';
+        const scopeOptions: Array<[ConstraintMoveScope, string]> = [['fragment', 'Fragment'], ['atom', 'Atom']];
+        for (const [value, label] of scopeOptions) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            option.disabled = !this.constraintSession.isMoveScopeAvailable(value);
+            option.selected = value === this.constraintSession.moveScope;
+            this.constraintPanel.scopeSelect.appendChild(option);
+        }
         this.constraintPanel.lockSelect.innerHTML = '';
         for (const atomIndex of this.constraintSession.allowedLockedAtomIndices) {
             const option = document.createElement('option');
@@ -950,6 +997,19 @@ export class StructureEditorController {
             this.scheduleFrame();
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to update the locked atom.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.syncConstraintPanel();
+        }
+    }
+
+    private changeMoveScope(scope: ConstraintMoveScope) {
+        if (!this.constraintSession) return;
+        try {
+            this.constraintSession.setMoveScope(scope);
+            this.syncConstraintPanel();
+            this.scheduleFrame();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update move scope.';
             showToast(this.plugin, 'Structure Editor', message);
             this.syncConstraintPanel();
         }

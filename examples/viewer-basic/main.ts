@@ -5,6 +5,7 @@ import {
 } from '../../src/index';
 
 const benzeneUrl = new URL('./assets/benzene.mol', import.meta.url).href;
+const biphenylUrl = new URL('./assets/biphenyl.mol', import.meta.url).href;
 const proteinUrl = 'https://models.rcsb.org/1crn.bcif';
 
 async function bootstrap() {
@@ -35,13 +36,15 @@ async function bootstrap() {
     viewer.plugin.selectionMode = true;
     (window as any).__molstarStructureEditorPlugin = viewer.plugin;
 
-    const loadSample = async (kind: 'protein' | 'ligand') => {
+    const loadSample = async (kind: 'protein' | 'ligand' | 'biphenyl') => {
         await viewer.plugin.clear();
         viewer.plugin.managers.interactivity.setProps({ granularity: 'element' });
         viewer.plugin.selectionMode = true;
 
-        if (kind === 'ligand') {
-            await viewer.loadStructureFromUrl(benzeneUrl, 'mol', false, { label: 'Ligand: Benzene' });
+        if (kind === 'ligand' || kind === 'biphenyl') {
+            const url = kind === 'ligand' ? benzeneUrl : biphenylUrl;
+            const label = kind === 'ligand' ? 'Ligand: Benzene' : 'Ligand: Biphenyl';
+            await viewer.loadStructureFromUrl(url, 'mol', false, { label });
             const structures = viewer.plugin.managers.structure.hierarchy.current.structures;
             await viewer.plugin.managers.structure.component.applyPreset(structures, 'atomic-detail' as any);
             return;
@@ -75,7 +78,8 @@ async function bootstrap() {
 
         const buttons = [
             ['Protein', () => loadSample('protein')],
-            ['Ligand', () => loadSample('ligand')],
+            ['Benzene', () => loadSample('ligand')],
+            ['Biphenyl', () => loadSample('biphenyl')],
         ] as const;
 
         for (const [label, action] of buttons) {

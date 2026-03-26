@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { Model } from 'molstar/lib/mol-model/structure';
+import { Mat4 } from 'molstar/lib/mol-math/linear-algebra';
+import { Model, Structure } from 'molstar/lib/mol-model/structure';
 import { createConstraintEditSession, commitConstraintSession, cancelConstraintSession } from '../constraint-session';
 
 function createModel(points: Array<[number, number, number]>) {
@@ -12,11 +13,51 @@ function createModel(points: Array<[number, number, number]>) {
     } as unknown as Model;
 }
 
+function createIntraUnitBonds(atomCount: number, edges: Array<[number, number]>) {
+    const adjacency = Array.from({ length: atomCount }, () => [] as number[]);
+    for (const [a, b] of edges) {
+        adjacency[a].push(b);
+        adjacency[b].push(a);
+    }
+
+    const offset = new Int32Array(atomCount + 1);
+    let total = 0;
+    for (let i = 0; i < atomCount; i++) {
+        offset[i] = total;
+        total += adjacency[i].length;
+    }
+    offset[atomCount] = total;
+
+    const b = new Int32Array(total);
+    let cursor = 0;
+    for (let i = 0; i < atomCount; i++) {
+        for (const neighbor of adjacency[i]) b[cursor++] = neighbor;
+    }
+    return { offset, b };
+}
+
+function createStructure(model: Model, atomCount: number, edges: Array<[number, number]>) {
+    const unit = {
+        id: 1,
+        kind: 0,
+        elements: Int32Array.from(Array.from({ length: atomCount }, (_, i) => i)),
+        bonds: createIntraUnitBonds(atomCount, edges),
+        conformation: { operator: { matrix: Mat4.identity() } },
+    };
+    return {
+        model,
+        units: [unit],
+        interUnitBonds: { edges: [] },
+    } as unknown as Structure;
+}
+
 describe('constraint edit sessions', () => {
-    it('creates a distance session and updates the current value', () => {
+    it('creates a distance session and updates the current value by moving the full fragment', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
         const session = createConstraintEditSession({
             kind: 'distance',
-            model: createModel([[0, 0, 0], [1, 0, 0]]),
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2]]),
             atomIndices: [0, 1],
         });
 
@@ -26,12 +67,16 @@ describe('constraint edit sessions', () => {
 
         expect(session.currentValue).toBeCloseTo(2, 5);
         expect(session.currentFrame.x[1]).toBeCloseTo(2, 5);
+        expect(session.currentFrame.x[2]).toBeCloseTo(3, 5);
+        expect(session.movableAtomIndices).toEqual([1, 2]);
     });
 
     it('cancels back to the base frame and commits the edited frame', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0]]);
         const session = createConstraintEditSession({
             kind: 'distance',
-            model: createModel([[0, 0, 0], [1, 0, 0]]),
+            model,
+            structure: createStructure(model, 2, [[0, 1]]),
             atomIndices: [0, 1],
         });
 
@@ -46,9 +91,11 @@ describe('constraint edit sessions', () => {
     });
 
     it('can switch the locked atom for a distance constraint', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
         const session = createConstraintEditSession({
             kind: 'distance',
-            model: createModel([[0, 0, 0], [1, 0, 0]]),
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2]]),
             atomIndices: [0, 1],
         });
 
@@ -59,12 +106,32 @@ describe('constraint edit sessions', () => {
         expect(session.movableAtomIndices).toEqual([0]);
         expect(session.currentFrame.x[1]).toBeCloseTo(1, 5);
         expect(session.currentFrame.x[0]).toBeCloseTo(-1, 5);
+        expect(session.currentFrame.x[2]).toBeCloseTo(2, 5);
     });
 
-    it('can switch the locked side for an angle constraint', () => {
+    it('moves the full C-side fragment for an angle constraint when A is locked', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 1, 0], [3, 1, 0]]);
         const session = createConstraintEditSession({
             kind: 'angle',
-            model: createModel([[0, 0, 0], [1, 0, 0], [2, 1, 0]]),
+            model,
+            structure: createStructure(model, 4, [[0, 1], [1, 2], [2, 3]]),
+            atomIndices: [0, 1, 2],
+        });
+
+        session.update(120);
+
+        expect(session.anchorAtomIndices).toEqual([0, 1]);
+        expect(session.movableAtomIndices).toEqual([2, 3]);
+        expect(session.currentFrame.x[2]).not.toBeCloseTo(2, 5);
+        expect(session.currentFrame.y[3]).not.toBeCloseTo(1, 5);
+    });
+
+    it('moves the full A-side fragment for an angle constraint when C is locked', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 1, 0], [0, -1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'angle',
+            model,
+            structure: createStructure(model, 4, [[0, 1], [1, 2], [0, 3]]),
             atomIndices: [0, 1, 2],
         });
 
@@ -72,25 +139,81 @@ describe('constraint edit sessions', () => {
         session.update(90);
 
         expect(session.anchorAtomIndices).toEqual([1, 2]);
-        expect(session.movableAtomIndices).toEqual([0]);
-        expect(session.currentValue).toBeCloseTo(90, 5);
-        expect(session.currentFrame.x[2]).toBeCloseTo(2, 5);
+        expect(session.movableAtomIndices).toEqual([0, 3]);
         expect(session.currentFrame.x[0]).not.toBeCloseTo(0, 5);
+        expect(session.currentFrame.x[3]).not.toBeCloseTo(0, 5);
+        expect(session.currentFrame.x[2]).toBeCloseTo(2, 5);
     });
 
-    it('can switch the locked side for a dihedral constraint', () => {
+    it('moves the full C-side fragment for a dihedral constraint', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0], [3, 1, 0]]);
         const session = createConstraintEditSession({
             kind: 'dihedral',
-            model: createModel([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]]),
+            model,
+            structure: createStructure(model, 5, [[0, 1], [1, 2], [2, 3], [3, 4]]),
             atomIndices: [0, 1, 2, 3],
         });
 
-        session.setLockedAtomIndex(3);
         session.update(90);
 
-        expect(session.anchorAtomIndices).toEqual([1, 2, 3]);
-        expect(session.movableAtomIndices).toEqual([0]);
-        expect(session.currentFrame.x[3]).toBeCloseTo(2, 5);
-        expect(session.currentFrame.z[0]).not.toBeCloseTo(0, 5);
+        expect(session.movableAtomIndices).toEqual([2, 3, 4]);
+        expect(session.currentFrame.z[4]).not.toBeCloseTo(0, 5);
+    });
+
+    it('falls back to atom scope when the selected center bond cannot split the graph', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [0.5, 1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'distance',
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2], [2, 0]]),
+            atomIndices: [0, 1],
+        });
+
+        expect(session.moveScope).toBe('atom');
+        expect(session.movableAtomIndices).toEqual([1]);
+        expect(session.isMoveScopeAvailable('atom')).toBe(true);
+        expect(session.isMoveScopeAvailable('fragment')).toBe(false);
+        expect(() => session.setMoveScope('fragment')).toThrowError('Fragment scope is not available');
+    });
+
+    it('supports atom-only scope on a ring when fragment scope cannot split', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [0.5, 1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'distance',
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2], [2, 0]]),
+            atomIndices: [0, 1],
+            moveScope: 'atom',
+        });
+
+        expect(session.movableAtomIndices).toEqual([1]);
+        session.update(2);
+        expect(session.currentFrame.x[1]).toBeCloseTo(2, 5);
+    });
+
+    it('can switch between fragment and atom scope', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'distance',
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2]]),
+            atomIndices: [0, 1],
+        });
+        expect(session.moveScope).toBe('fragment');
+        expect(session.movableAtomIndices).toEqual([1, 2]);
+
+        session.setMoveScope('atom');
+        expect(session.moveScope).toBe('atom');
+        expect(session.movableAtomIndices).toEqual([1]);
+    });
+
+    it('throws when selected atoms do not define the expected bonded path', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
+        expect(() => createConstraintEditSession({
+            kind: 'distance',
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2]]),
+            atomIndices: [0, 2],
+        })).toThrowError('not connected by a bond');
     });
 });
