@@ -1,9 +1,10 @@
 import { Frame, Model, Structure, Unit } from 'molstar/lib/mol-model/structure';
-import { Mat4 } from 'molstar/lib/mol-math/linear-algebra';
+import { Mat4, Vec3 } from 'molstar/lib/mol-math/linear-algebra';
 import {
     applyAngleConstraint,
     applyDihedralConstraint,
     applyDistanceConstraint,
+    getFlexibleWeight,
     measureAngle,
     measureDihedral,
     measureDistance,
@@ -12,6 +13,7 @@ import {
 
 export type ConstraintKind = 'distance' | 'angle' | 'dihedral';
 export type ConstraintMoveScope = 'fragment' | 'atom';
+export type ConstraintType = 'rigid' | 'flexible';
 
 export interface ConstraintEditSession {
     readonly kind: ConstraintKind
@@ -25,12 +27,17 @@ export interface ConstraintEditSession {
     readonly allowedLockedAtomIndices: number[]
     lockedAtomIndex: number
     moveScope: ConstraintMoveScope
+    constraintType: ConstraintType
+    flexMaxBondDepth: number
+    flexStrength: number
     originalValue: number
     currentValue: number
     update: (targetValue: number) => void
     setLockedAtomIndex: (atomIndex: number) => void
     setMoveScope: (scope: ConstraintMoveScope) => void
     isMoveScopeAvailable: (scope: ConstraintMoveScope) => boolean
+    setConstraintType: (type: ConstraintType) => void
+    setFlexParams: (params: { maxBondDepth?: number; strength?: number }) => void
 }
 
 type CreateConstraintEditSessionParams = {
@@ -39,7 +46,22 @@ type CreateConstraintEditSessionParams = {
     structure: Structure
     atomIndices: [number, number] | [number, number, number] | [number, number, number, number]
     moveScope?: ConstraintMoveScope
+    constraintType?: ConstraintType
+    flexMaxBondDepth?: number
+    flexStrength?: number
 };
+
+type ConstraintResolution = {
+    resolvedAtomIndices: ConstraintEditSession['atomIndices']
+    anchorAtomIndices: number[]
+    cutBond: [number, number]
+    movableFragmentSeedAtomIndex: number
+    movableAtomIndex: number
+};
+
+type ConstraintTransform =
+    | { kind: 'translation'; delta: Vec3 }
+    | { kind: 'rotation'; origin: Vec3; axis: Vec3; angleInRadians: number };
 
 function cloneNumberArray(xs: ArrayLike<number>) {
     return ArrayBuffer.isView(xs)
@@ -68,37 +90,11 @@ function copyFrame(into: Frame, from: Frame) {
     into.time.value += 1;
 }
 
-function measure(kind: ConstraintKind, frame: MutableFrame, atomIndices: ConstraintEditSession['atomIndices']) {
-    if (kind === 'distance') return measureDistance(frame, atomIndices as [number, number]);
-    if (kind === 'angle') return measureAngle(frame, atomIndices as [number, number, number]);
-    return measureDihedral(frame, atomIndices as [number, number, number, number]);
-}
-
-function apply(kind: ConstraintKind, frame: MutableFrame, atomIndices: ConstraintEditSession['atomIndices'], movableAtomIndices: readonly number[], value: number) {
-    if (kind === 'distance') {
-        applyDistanceConstraint(frame, atomIndices as [number, number], movableAtomIndices, value);
-        return;
-    }
-    if (kind === 'angle') {
-        applyAngleConstraint(frame, atomIndices as [number, number, number], movableAtomIndices, value);
-        return;
-    }
-    applyDihedralConstraint(frame, atomIndices as [number, number, number, number], movableAtomIndices, value);
-}
-
 function getAllowedLockedAtomIndices(kind: ConstraintKind, atomIndices: ConstraintEditSession['atomIndices']) {
     if (kind === 'distance') return [atomIndices[0] as number, atomIndices[1] as number];
     if (kind === 'angle') return [atomIndices[0] as number, atomIndices[2] as number];
     return [atomIndices[0] as number, atomIndices[3] as number];
 }
-
-type ConstraintResolution = {
-    resolvedAtomIndices: ConstraintEditSession['atomIndices']
-    anchorAtomIndices: number[]
-    cutBond: [number, number]
-    movableFragmentSeedAtomIndex: number
-    movableAtomIndex: number
-};
 
 function getResolvedConstraint(kind: ConstraintKind, atomIndices: ConstraintEditSession['atomIndices'], lockedAtomIndex: number): ConstraintResolution {
     if (kind === 'distance') {
@@ -297,7 +293,227 @@ function resolveMovableAtoms(
     return resolveMovableFragmentAtoms(adjacency, kind, atomIndices, lockedAtomIndex);
 }
 
-export function createConstraintEditSession({ kind, model, structure, atomIndices, moveScope = 'fragment' }: CreateConstraintEditSessionParams): ConstraintEditSession {
+function measure(kind: ConstraintKind, frame: MutableFrame, atomIndices: ConstraintEditSession['atomIndices']) {
+    if (kind === 'distance') return measureDistance(frame, atomIndices as [number, number]);
+    if (kind === 'angle') return measureAngle(frame, atomIndices as [number, number, number]);
+    return measureDihedral(frame, atomIndices as [number, number, number, number]);
+}
+
+function applyRigidConstraint(kind: ConstraintKind, frame: MutableFrame, atomIndices: ConstraintEditSession['atomIndices'], movableAtomIndices: readonly number[], value: number) {
+    if (kind === 'distance') {
+        applyDistanceConstraint(frame, atomIndices as [number, number], movableAtomIndices, value);
+        return;
+    }
+    if (kind === 'angle') {
+        applyAngleConstraint(frame, atomIndices as [number, number, number], movableAtomIndices, value);
+        return;
+    }
+    applyDihedralConstraint(frame, atomIndices as [number, number, number, number], movableAtomIndices, value);
+}
+
+function getPoint(frame: MutableFrame, atomIndex: number) {
+    return Vec3.create(frame.x[atomIndex], frame.y[atomIndex], frame.z[atomIndex]);
+}
+
+function setPoint(frame: MutableFrame, atomIndex: number, point: Vec3) {
+    (frame.x as Float32Array | Float64Array)[atomIndex] = point[0];
+    (frame.y as Float32Array | Float64Array)[atomIndex] = point[1];
+    (frame.z as Float32Array | Float64Array)[atomIndex] = point[2];
+}
+
+function degreesToRadians(degrees: number) {
+    return degrees * Math.PI / 180;
+}
+
+function wrapDegrees(value: number) {
+    let next = value;
+    while (next > 180) next -= 360;
+    while (next <= -180) next += 360;
+    return next;
+}
+
+function getConstraintTransform(kind: ConstraintKind, frame: MutableFrame, atomIndices: ConstraintEditSession['atomIndices'], targetValue: number): ConstraintTransform {
+    if (kind === 'distance') {
+        const [a, b] = atomIndices as [number, number];
+        const anchor = getPoint(frame, a);
+        const movable = getPoint(frame, b);
+        const direction = Vec3.sub(Vec3(), movable, anchor);
+        const length = Vec3.magnitude(direction);
+        if (length < 1e-6) throw new Error('Cannot edit distance for coincident atoms.');
+        Vec3.scale(direction, direction, 1 / length);
+        const targetPoint = Vec3.scaleAndAdd(Vec3(), anchor, direction, targetValue);
+        return { kind: 'translation', delta: Vec3.sub(Vec3(), targetPoint, movable) };
+    }
+
+    if (kind === 'angle') {
+        const [a, b, c] = atomIndices as [number, number, number];
+        const pointA = getPoint(frame, a);
+        const pointB = getPoint(frame, b);
+        const pointC = getPoint(frame, c);
+        const ba = Vec3.sub(Vec3(), pointA, pointB);
+        const bc = Vec3.sub(Vec3(), pointC, pointB);
+        const normal = Vec3.cross(Vec3(), ba, bc);
+        const normalLength = Vec3.magnitude(normal);
+        if (Vec3.magnitude(ba) < 1e-6 || Vec3.magnitude(bc) < 1e-6 || normalLength < 1e-6) {
+            throw new Error('Cannot edit angle for degenerate atoms.');
+        }
+        Vec3.scale(normal, normal, 1 / normalLength);
+        const current = measureAngle(frame, [a, b, c]);
+        return { kind: 'rotation', origin: pointB, axis: normal, angleInRadians: degreesToRadians(targetValue - current) };
+    }
+
+    const [a, b, c, d] = atomIndices as [number, number, number, number];
+    void a;
+    void d;
+    const pointB = getPoint(frame, b);
+    const pointC = getPoint(frame, c);
+    const axis = Vec3.sub(Vec3(), pointC, pointB);
+    const axisLength = Vec3.magnitude(axis);
+    if (axisLength < 1e-6) {
+        throw new Error('Cannot edit dihedral with coincident middle atoms.');
+    }
+    Vec3.scale(axis, axis, 1 / axisLength);
+    const current = measureDihedral(frame, [a, b, c, d]);
+    return { kind: 'rotation', origin: pointC, axis, angleInRadians: degreesToRadians(wrapDegrees(targetValue - current)) };
+}
+
+function applyTransformToAtoms(baseFrame: MutableFrame, currentFrame: MutableFrame, atomIndices: readonly number[], transform: ConstraintTransform, weight: number) {
+    if (weight === 0) return;
+    if (transform.kind === 'translation') {
+        for (const atomIndex of atomIndices) {
+            const point = getPoint(baseFrame, atomIndex);
+            Vec3.scaleAndAdd(point, point, transform.delta, weight);
+            setPoint(currentFrame, atomIndex, point);
+        }
+        return;
+    }
+
+    const rotation = Mat4.fromRotation(Mat4(), transform.angleInRadians * weight, transform.axis);
+    const relative = Vec3.zero();
+    const rotated = Vec3.zero();
+    for (const atomIndex of atomIndices) {
+        Vec3.sub(relative, getPoint(baseFrame, atomIndex), transform.origin);
+        Vec3.transformMat4(rotated, relative, rotation);
+        Vec3.add(rotated, rotated, transform.origin);
+        setPoint(currentFrame, atomIndex, rotated);
+    }
+}
+
+function collectFlexibleDepthMap(
+    adjacency: Map<number, Set<number>>,
+    seedAtomIndices: readonly number[],
+    maxDepth: number,
+    blockedAtomIndices: ReadonlySet<number>,
+) {
+    const depthMap = new Map<number, number>();
+    const queue: Array<[number, number]> = [];
+    for (const seedAtomIndex of seedAtomIndices) {
+        if (depthMap.has(seedAtomIndex)) continue;
+        depthMap.set(seedAtomIndex, 0);
+        queue.push([seedAtomIndex, 0]);
+    }
+    while (queue.length) {
+        const [current, depth] = queue.shift()!;
+        if (depth >= maxDepth) continue;
+        const neighbors = adjacency.get(current);
+        if (!neighbors) continue;
+        for (const next of neighbors) {
+            if (depthMap.has(next) || blockedAtomIndices.has(next)) continue;
+            const nextDepth = depth + 1;
+            depthMap.set(next, nextDepth);
+            queue.push([next, nextDepth]);
+        }
+    }
+    return depthMap;
+}
+
+function applyFlexibleConstraint(
+    baseFrame: MutableFrame,
+    currentFrame: MutableFrame,
+    adjacency: Map<number, Set<number>>,
+    kind: ConstraintKind,
+    resolvedAtomIndices: ConstraintEditSession['atomIndices'],
+    seedAtomIndices: readonly number[],
+    anchorAtomIndices: readonly number[],
+    targetValue: number,
+    maxBondDepth: number,
+    strength: number,
+) {
+    const transform = getConstraintTransform(kind, baseFrame, resolvedAtomIndices, targetValue);
+    const uniqueSeeds = Array.from(new Set(seedAtomIndices));
+    applyTransformToAtoms(baseFrame, currentFrame, uniqueSeeds, transform, 1);
+
+    if (maxBondDepth < 1 || strength <= 0) {
+        currentFrame.time.value += 1;
+        return;
+    }
+
+    const seedSet = new Set(uniqueSeeds);
+    const blocked = new Set(anchorAtomIndices);
+    const depthMap = collectFlexibleDepthMap(adjacency, uniqueSeeds, maxBondDepth, blocked);
+    for (const [atomIndex, depth] of depthMap) {
+        if (depth === 0 || seedSet.has(atomIndex)) continue;
+        const weight = getFlexibleWeight(depth, strength);
+        applyTransformToAtoms(baseFrame, currentFrame, [atomIndex], transform, weight);
+    }
+    currentFrame.time.value += 1;
+}
+
+function clampFlexStrength(value: number) {
+    if (!Number.isFinite(value)) return 0.5;
+    return Math.max(0, Math.min(1, value));
+}
+
+function clampFlexMaxBondDepth(value: number) {
+    if (!Number.isFinite(value)) return 2;
+    return Math.max(0, Math.min(6, Math.round(value)));
+}
+
+function normalizeConstraintType(type: ConstraintType | undefined): ConstraintType {
+    return type === 'flexible' ? 'flexible' : 'rigid';
+}
+
+function applyConstraintForSession(
+    session: ConstraintEditSession,
+    adjacency: Map<number, Set<number>>,
+    kind: ConstraintKind,
+    atomIndices: ConstraintEditSession['atomIndices'],
+    targetValue: number,
+) {
+    copyFrame(session.currentFrame, session.baseFrame);
+    const next = resolveMovableAtoms(adjacency, kind, atomIndices, session.lockedAtomIndex, session.moveScope);
+    session.anchorAtomIndices = next.anchorAtomIndices;
+    session.movableAtomIndices = next.movableAtomIndices;
+
+    if (session.constraintType === 'rigid') {
+        applyRigidConstraint(kind, session.currentFrame, next.resolvedAtomIndices as any, session.movableAtomIndices, targetValue);
+    } else {
+        applyFlexibleConstraint(
+            session.baseFrame,
+            session.currentFrame,
+            adjacency,
+            kind,
+            next.resolvedAtomIndices,
+            session.movableAtomIndices,
+            session.anchorAtomIndices,
+            targetValue,
+            session.flexMaxBondDepth,
+            session.flexStrength,
+        );
+    }
+    session.currentValue = measure(kind, session.currentFrame, atomIndices);
+}
+
+export function createConstraintEditSession({
+    kind,
+    model,
+    structure,
+    atomIndices,
+    moveScope = 'fragment',
+    constraintType,
+    flexMaxBondDepth,
+    flexStrength,
+}: CreateConstraintEditSessionParams): ConstraintEditSession {
     if (structure.model !== model) {
         throw new Error('Constraint editing currently supports a single model structure only.');
     }
@@ -328,15 +544,13 @@ export function createConstraintEditSession({ kind, model, structure, atomIndice
         allowedLockedAtomIndices,
         lockedAtomIndex: defaultLockedAtomIndex,
         moveScope: defaultScope,
+        constraintType: normalizeConstraintType(constraintType),
+        flexMaxBondDepth: clampFlexMaxBondDepth(flexMaxBondDepth ?? 2),
+        flexStrength: clampFlexStrength(flexStrength ?? 0.5),
         originalValue,
         currentValue: originalValue,
         update(targetValue: number) {
-            copyFrame(currentFrame, baseFrame);
-            const next = resolveMovableAtoms(adjacency, kind, atomIndices, session.lockedAtomIndex, session.moveScope);
-            session.anchorAtomIndices = next.anchorAtomIndices;
-            session.movableAtomIndices = next.movableAtomIndices;
-            apply(kind, currentFrame, next.resolvedAtomIndices as any, session.movableAtomIndices, targetValue);
-            session.currentValue = measure(kind, currentFrame, atomIndices);
+            applyConstraintForSession(session, adjacency, kind, atomIndices, targetValue);
         },
         setLockedAtomIndex(atomIndex: number) {
             if (!session.allowedLockedAtomIndices.includes(atomIndex)) {
@@ -346,12 +560,7 @@ export function createConstraintEditSession({ kind, model, structure, atomIndice
             if (session.moveScope === 'fragment' && !isFragmentScopeAvailable(adjacency, kind, atomIndices, atomIndex)) {
                 session.moveScope = 'atom';
             }
-            const next = resolveMovableAtoms(adjacency, kind, atomIndices, atomIndex, session.moveScope);
-            session.anchorAtomIndices = next.anchorAtomIndices;
-            session.movableAtomIndices = next.movableAtomIndices;
-            copyFrame(currentFrame, baseFrame);
-            apply(kind, currentFrame, next.resolvedAtomIndices as any, session.movableAtomIndices, session.currentValue);
-            session.currentValue = measure(kind, currentFrame, atomIndices);
+            applyConstraintForSession(session, adjacency, kind, atomIndices, session.currentValue);
         },
         setMoveScope(scope: ConstraintMoveScope) {
             if (scope !== 'atom' && scope !== 'fragment') {
@@ -361,16 +570,24 @@ export function createConstraintEditSession({ kind, model, structure, atomIndice
                 throw new Error('Fragment scope is not available for the selected atoms and lock side.');
             }
             session.moveScope = scope;
-            const next = resolveMovableAtoms(adjacency, kind, atomIndices, session.lockedAtomIndex, scope);
-            session.anchorAtomIndices = next.anchorAtomIndices;
-            session.movableAtomIndices = next.movableAtomIndices;
-            copyFrame(currentFrame, baseFrame);
-            apply(kind, currentFrame, next.resolvedAtomIndices as any, session.movableAtomIndices, session.currentValue);
-            session.currentValue = measure(kind, currentFrame, atomIndices);
+            applyConstraintForSession(session, adjacency, kind, atomIndices, session.currentValue);
         },
         isMoveScopeAvailable(scope: ConstraintMoveScope) {
             if (scope === 'atom') return true;
             return isFragmentScopeAvailable(adjacency, kind, atomIndices, session.lockedAtomIndex);
+        },
+        setConstraintType(type: ConstraintType) {
+            session.constraintType = normalizeConstraintType(type);
+            applyConstraintForSession(session, adjacency, kind, atomIndices, session.currentValue);
+        },
+        setFlexParams(params: { maxBondDepth?: number; strength?: number }) {
+            if (params.maxBondDepth !== undefined) {
+                session.flexMaxBondDepth = clampFlexMaxBondDepth(params.maxBondDepth);
+            }
+            if (params.strength !== undefined) {
+                session.flexStrength = clampFlexStrength(params.strength);
+            }
+            applyConstraintForSession(session, adjacency, kind, atomIndices, session.currentValue);
         },
     };
 

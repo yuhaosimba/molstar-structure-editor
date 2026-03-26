@@ -223,6 +223,85 @@ describe('constraint edit sessions', () => {
         expect(session.currentFrame.z[2]).toBeCloseTo(0, 5);
     });
 
+    it('supports flexible distance propagation with depth and strength falloff', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'distance',
+            model,
+            structure: createStructure(model, 4, [[0, 1], [1, 2], [2, 3]]),
+            atomIndices: [0, 1],
+            moveScope: 'atom',
+            constraintType: 'flexible',
+            flexMaxBondDepth: 2,
+            flexStrength: 0.5,
+        });
+
+        session.update(2);
+
+        expect(session.currentFrame.x[0]).toBeCloseTo(0, 5);
+        expect(session.currentFrame.x[1]).toBeCloseTo(2, 5);
+        expect(session.currentFrame.x[2]).toBeCloseTo(2.25, 5);
+        expect(session.currentFrame.x[3]).toBeCloseTo(3.125, 5);
+    });
+
+    it('supports flexible angle propagation', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 1, 0], [3, 1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'angle',
+            model,
+            structure: createStructure(model, 4, [[0, 1], [1, 2], [2, 3]]),
+            atomIndices: [0, 1, 2],
+            moveScope: 'atom',
+            constraintType: 'flexible',
+            flexMaxBondDepth: 2,
+            flexStrength: 0.5,
+        });
+
+        session.update(120);
+
+        expect(session.currentFrame.x[2]).not.toBeCloseTo(2, 5);
+        expect(session.currentFrame.x[3]).not.toBeCloseTo(3, 5);
+        expect(session.currentFrame.x[0]).toBeCloseTo(0, 5);
+    });
+
+    it('supports flexible dihedral propagation', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0], [3, 1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'dihedral',
+            model,
+            structure: createStructure(model, 5, [[0, 1], [1, 2], [2, 3], [3, 4]]),
+            atomIndices: [0, 1, 2, 3],
+            moveScope: 'atom',
+            constraintType: 'flexible',
+            flexMaxBondDepth: 2,
+            flexStrength: 0.5,
+        });
+
+        session.update(90);
+
+        expect(session.currentFrame.z[3]).not.toBeCloseTo(0, 5);
+        expect(session.currentFrame.z[4]).not.toBeCloseTo(0, 5);
+        expect(session.currentFrame.z[2]).toBeCloseTo(0, 5);
+    });
+
+    it('can switch between rigid and flexible and update flex params', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'distance',
+            model,
+            structure: createStructure(model, 3, [[0, 1], [1, 2]]),
+            atomIndices: [0, 1],
+            moveScope: 'atom',
+        });
+
+        expect(session.constraintType).toBe('rigid');
+        session.setConstraintType('flexible');
+        session.setFlexParams({ maxBondDepth: 3, strength: 0.7 });
+        expect(session.constraintType).toBe('flexible');
+        expect(session.flexMaxBondDepth).toBe(3);
+        expect(session.flexStrength).toBeCloseTo(0.7, 6);
+    });
+
     it('throws when selected atoms do not define the expected bonded path', () => {
         const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
         expect(() => createConstraintEditSession({

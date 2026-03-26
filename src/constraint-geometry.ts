@@ -55,6 +55,13 @@ function wrapDegrees(value: number) {
     return next;
 }
 
+export function getFlexibleWeight(depth: number, strength: number) {
+    if (!Number.isFinite(depth) || depth < 0) return 0;
+    if (!Number.isFinite(strength)) return 0;
+    const clampedStrength = Math.max(0, Math.min(1, strength));
+    return clampedStrength * Math.pow(0.5, depth);
+}
+
 export function measureDistance(frame: MutableFrame, [a, b]: Pair) {
     return Vec3.distance(getPoint(frame, a), getPoint(frame, b));
 }

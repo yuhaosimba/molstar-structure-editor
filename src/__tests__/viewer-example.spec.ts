@@ -37,6 +37,9 @@ describe('viewer example', () => {
     it('renders a lock selector for constraint editing', () => {
         expect(behaviorTs).toContain('Locked Atom');
         expect(behaviorTs).toContain('Move Scope');
+        expect(behaviorTs).toContain('Constraint Type');
+        expect(behaviorTs).toContain('Max Bond Depth');
+        expect(behaviorTs).toContain('Strength');
     });
 
     it('passes structure into constraint sessions for graph-based fragment resolution', () => {
@@ -45,13 +48,16 @@ describe('viewer example', () => {
 
     it('shows fragment-oriented summary text in the constraint panel', () => {
         expect(behaviorTs).toContain('Locked side atoms:');
+        expect(behaviorTs).toContain('Mode:');
         expect(behaviorTs).toContain("const movableLabel = this.constraintSession.moveScope === 'fragment' ? 'Movable fragment atoms' : 'Movable atoms'");
     });
 
     it('includes a local small-molecule ligand example for interaction testing', () => {
         expect(mainTs).toContain('benzene.mol');
         expect(mainTs).toContain('biphenyl.mol');
+        expect(mainTs).toContain('c60.mol');
         expect(mainTs).toContain('Benzene');
         expect(mainTs).toContain('Biphenyl');
+        expect(mainTs).toContain('C60');
     });
 });

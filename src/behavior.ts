@@ -10,7 +10,7 @@ import { PluginConfig } from 'molstar/lib/mol-plugin/config';
 import { Binding } from 'molstar/lib/mol-util/binding';
 import { Mat4, Vec2, Vec3, Vec4 } from 'molstar/lib/mol-math/linear-algebra';
 import { StructureEditorCommands } from './commands';
-import { ConstraintEditSession, ConstraintKind, ConstraintMoveScope, cancelConstraintSession, commitConstraintSession, createConstraintEditSession } from './constraint-session';
+import { ConstraintEditSession, ConstraintKind, ConstraintMoveScope, ConstraintType, cancelConstraintSession, commitConstraintSession, createConstraintEditSession } from './constraint-session';
 import { CoordinateUpdater } from './coordinate-updater';
 import { getClosestPolylineSegment, Point as ScreenPoint, pickGizmoHandleAtPoint } from './gizmo-hit-test';
 import { GizmoHandleId, StructureEditorGizmo3D } from './gizmo-representation';
@@ -38,8 +38,15 @@ type ConstraintPanelElements = {
     title: HTMLHeadingElement
     summary: HTMLParagraphElement
     original: HTMLParagraphElement
+    typeLabel: HTMLLabelElement
+    typeSelect: HTMLSelectElement
     scopeLabel: HTMLLabelElement
     scopeSelect: HTMLSelectElement
+    flexDepthLabel: HTMLLabelElement
+    flexDepthInput: HTMLInputElement
+    flexStrengthLabel: HTMLLabelElement
+    flexStrengthSlider: HTMLInputElement
+    flexStrengthInput: HTMLInputElement
     lockLabel: HTMLLabelElement
     lockSelect: HTMLSelectElement
     input: HTMLInputElement
@@ -851,6 +858,23 @@ export class StructureEditorController {
         original.style.margin = '0';
         original.style.fontSize = '13px';
 
+        const typeLabel = document.createElement('label');
+        typeLabel.textContent = 'Constraint Type';
+        typeLabel.style.display = 'flex';
+        typeLabel.style.flexDirection = 'column';
+        typeLabel.style.gap = '6px';
+        typeLabel.style.fontSize = '12px';
+        typeLabel.style.color = 'rgba(255,255,255,0.9)';
+
+        const typeSelect = document.createElement('select');
+        typeSelect.style.padding = '8px';
+        typeSelect.style.borderRadius = '6px';
+        typeSelect.style.border = '1px solid rgba(255,255,255,0.2)';
+        typeSelect.style.background = 'rgba(255,255,255,0.08)';
+        typeSelect.style.color = '#fff';
+        typeSelect.addEventListener('change', () => this.changeConstraintType(typeSelect.value as ConstraintType));
+        typeLabel.appendChild(typeSelect);
+
         const scopeLabel = document.createElement('label');
         scopeLabel.textContent = 'Move Scope';
         scopeLabel.style.display = 'flex';
@@ -867,6 +891,63 @@ export class StructureEditorController {
         scopeSelect.style.color = '#fff';
         scopeSelect.addEventListener('change', () => this.changeMoveScope(scopeSelect.value as ConstraintMoveScope));
         scopeLabel.appendChild(scopeSelect);
+
+        const flexDepthLabel = document.createElement('label');
+        flexDepthLabel.textContent = 'Max Bond Depth';
+        flexDepthLabel.style.display = 'flex';
+        flexDepthLabel.style.flexDirection = 'column';
+        flexDepthLabel.style.gap = '6px';
+        flexDepthLabel.style.fontSize = '12px';
+        flexDepthLabel.style.color = 'rgba(255,255,255,0.9)';
+
+        const flexDepthInput = document.createElement('input');
+        flexDepthInput.type = 'number';
+        flexDepthInput.min = '0';
+        flexDepthInput.max = '6';
+        flexDepthInput.step = '1';
+        flexDepthInput.style.padding = '8px';
+        flexDepthInput.style.borderRadius = '6px';
+        flexDepthInput.style.border = '1px solid rgba(255,255,255,0.2)';
+        flexDepthInput.style.background = 'rgba(255,255,255,0.08)';
+        flexDepthInput.style.color = '#fff';
+        flexDepthInput.addEventListener('input', () => this.changeFlexDepth(Number(flexDepthInput.value)));
+        flexDepthLabel.appendChild(flexDepthInput);
+
+        const flexStrengthLabel = document.createElement('label');
+        flexStrengthLabel.textContent = 'Strength';
+        flexStrengthLabel.style.display = 'flex';
+        flexStrengthLabel.style.flexDirection = 'column';
+        flexStrengthLabel.style.gap = '6px';
+        flexStrengthLabel.style.fontSize = '12px';
+        flexStrengthLabel.style.color = 'rgba(255,255,255,0.9)';
+
+        const flexStrengthWrap = document.createElement('div');
+        flexStrengthWrap.style.display = 'flex';
+        flexStrengthWrap.style.gap = '8px';
+
+        const flexStrengthSlider = document.createElement('input');
+        flexStrengthSlider.type = 'range';
+        flexStrengthSlider.min = '0';
+        flexStrengthSlider.max = '1';
+        flexStrengthSlider.step = '0.01';
+        flexStrengthSlider.style.flex = '1';
+        flexStrengthSlider.addEventListener('input', () => this.changeFlexStrength(Number(flexStrengthSlider.value), 'slider'));
+
+        const flexStrengthInput = document.createElement('input');
+        flexStrengthInput.type = 'number';
+        flexStrengthInput.min = '0';
+        flexStrengthInput.max = '1';
+        flexStrengthInput.step = '0.01';
+        flexStrengthInput.style.width = '72px';
+        flexStrengthInput.style.padding = '8px';
+        flexStrengthInput.style.borderRadius = '6px';
+        flexStrengthInput.style.border = '1px solid rgba(255,255,255,0.2)';
+        flexStrengthInput.style.background = 'rgba(255,255,255,0.08)';
+        flexStrengthInput.style.color = '#fff';
+        flexStrengthInput.addEventListener('input', () => this.changeFlexStrength(Number(flexStrengthInput.value), 'input'));
+
+        flexStrengthWrap.append(flexStrengthSlider, flexStrengthInput);
+        flexStrengthLabel.appendChild(flexStrengthWrap);
 
         const lockLabel = document.createElement('label');
         lockLabel.textContent = 'Locked Atom';
@@ -920,11 +1001,31 @@ export class StructureEditorController {
 
         actions.append(cancel, apply);
 
-        root.append(title, summary, original, scopeLabel, lockLabel, slider, input, actions);
+        root.append(title, summary, original, typeLabel, scopeLabel, flexDepthLabel, flexStrengthLabel, lockLabel, slider, input, actions);
         host.style.position ||= 'relative';
         host.appendChild(root);
 
-        this.constraintPanel = { root, title, summary, original, scopeLabel, scopeSelect, lockLabel, lockSelect, input, slider, apply, cancel };
+        this.constraintPanel = {
+            root,
+            title,
+            summary,
+            original,
+            typeLabel,
+            typeSelect,
+            scopeLabel,
+            scopeSelect,
+            flexDepthLabel,
+            flexDepthInput,
+            flexStrengthLabel,
+            flexStrengthSlider,
+            flexStrengthInput,
+            lockLabel,
+            lockSelect,
+            input,
+            slider,
+            apply,
+            cancel
+        };
     }
 
     private destroyConstraintPanel() {
@@ -940,8 +1041,17 @@ export class StructureEditorController {
         const movablePreview = movableAtomIndices.slice(0, 6).map(i => `#${i}`).join(', ');
         const movableSuffix = movableAtomIndices.length > 6 ? ', ...' : '';
         const movableLabel = this.constraintSession.moveScope === 'fragment' ? 'Movable fragment atoms' : 'Movable atoms';
-        this.constraintPanel.summary.textContent = `Locked side atoms: ${anchorAtomIndices.length} | ${movableLabel}: ${movableAtomIndices.length}${movablePreview ? ` (${movablePreview}${movableSuffix})` : ''}`;
+        this.constraintPanel.summary.textContent = `Locked side atoms: ${anchorAtomIndices.length} | ${movableLabel}: ${movableAtomIndices.length}${movablePreview ? ` (${movablePreview}${movableSuffix})` : ''} | Mode: ${this.constraintSession.constraintType === 'flexible' ? 'Flexible' : 'Rigid'}`;
         this.constraintPanel.original.textContent = `Atoms ${atomIndices.join(' - ')} | Original: ${formatConstraintValue(kind, originalValue)} | Current: ${formatConstraintValue(kind, currentValue)}`;
+        this.constraintPanel.typeSelect.innerHTML = '';
+        const typeOptions: Array<[ConstraintType, string]> = [['rigid', 'Rigid'], ['flexible', 'Flexible']];
+        for (const [value, label] of typeOptions) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            option.selected = value === this.constraintSession.constraintType;
+            this.constraintPanel.typeSelect.appendChild(option);
+        }
         this.constraintPanel.scopeSelect.innerHTML = '';
         const scopeOptions: Array<[ConstraintMoveScope, string]> = [['fragment', 'Fragment'], ['atom', 'Atom']];
         for (const [value, label] of scopeOptions) {
@@ -952,6 +1062,15 @@ export class StructureEditorController {
             option.selected = value === this.constraintSession.moveScope;
             this.constraintPanel.scopeSelect.appendChild(option);
         }
+        const isFlexible = this.constraintSession.constraintType === 'flexible';
+        this.constraintPanel.flexDepthInput.disabled = !isFlexible;
+        this.constraintPanel.flexStrengthSlider.disabled = !isFlexible;
+        this.constraintPanel.flexStrengthInput.disabled = !isFlexible;
+        this.constraintPanel.flexDepthLabel.style.opacity = isFlexible ? '1' : '0.55';
+        this.constraintPanel.flexStrengthLabel.style.opacity = isFlexible ? '1' : '0.55';
+        this.constraintPanel.flexDepthInput.value = String(this.constraintSession.flexMaxBondDepth);
+        this.constraintPanel.flexStrengthSlider.value = String(this.constraintSession.flexStrength);
+        this.constraintPanel.flexStrengthInput.value = this.constraintSession.flexStrength.toFixed(2);
         this.constraintPanel.lockSelect.innerHTML = '';
         for (const atomIndex of this.constraintSession.allowedLockedAtomIndices) {
             const option = document.createElement('option');
@@ -1010,6 +1129,48 @@ export class StructureEditorController {
             this.scheduleFrame();
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to update move scope.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.syncConstraintPanel();
+        }
+    }
+
+    private changeConstraintType(type: ConstraintType) {
+        if (!this.constraintSession) return;
+        try {
+            this.constraintSession.setConstraintType(type);
+            this.syncConstraintPanel();
+            this.scheduleFrame();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update constraint type.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.syncConstraintPanel();
+        }
+    }
+
+    private changeFlexDepth(value: number) {
+        if (!this.constraintSession || !Number.isFinite(value)) return;
+        try {
+            this.constraintSession.setFlexParams({ maxBondDepth: value });
+            this.syncConstraintPanel();
+            this.scheduleFrame();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update max bond depth.';
+            showToast(this.plugin, 'Structure Editor', message);
+            this.syncConstraintPanel();
+        }
+    }
+
+    private changeFlexStrength(value: number, source: 'slider' | 'input') {
+        if (!this.constraintSession || !Number.isFinite(value)) return;
+        try {
+            this.constraintSession.setFlexParams({ strength: value });
+            this.syncConstraintPanel();
+            if (!this.constraintPanel) return;
+            if (source === 'slider') this.constraintPanel.flexStrengthInput.value = this.constraintSession.flexStrength.toFixed(2);
+            if (source === 'input') this.constraintPanel.flexStrengthSlider.value = String(this.constraintSession.flexStrength);
+            this.scheduleFrame();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update strength.';
             showToast(this.plugin, 'Structure Editor', message);
             this.syncConstraintPanel();
         }
