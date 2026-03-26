@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_GIZMO_SCALE, projectViewportPointToClientPoint } from '../behavior';
+import { DEFAULT_GIZMO_SCALE, projectViewportPointToClientPoint, toRepresentationPresetId } from '../behavior';
 
 describe('projectViewportPointToClientPoint', () => {
     it('converts viewport coordinates to client coordinates with top-left browser origin', () => {
@@ -18,5 +18,15 @@ describe('DEFAULT_GIZMO_SCALE', () => {
     it('keeps gizmo sizing fixed instead of camera-distance dependent', () => {
         expect(DEFAULT_GIZMO_SCALE).toBeGreaterThan(0);
         expect(DEFAULT_GIZMO_SCALE).toBe(2.5);
+    });
+});
+
+describe('toRepresentationPresetId', () => {
+    it('maps quick style presets to representation preset ids', () => {
+        expect(toRepresentationPresetId('default')).toBe('auto');
+        expect(toRepresentationPresetId('cartoon')).toBe('polymer-and-ligand');
+        expect(toRepresentationPresetId('ball-and-stick')).toBe('atomic-detail');
+        expect(toRepresentationPresetId('spacefill')).toBe('illustrative');
+        expect(toRepresentationPresetId('surface')).toBe('molecular-surface');
     });
 });

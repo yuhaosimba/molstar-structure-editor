@@ -153,26 +153,6 @@ function getResolvedConstraint(kind: ConstraintKind, atomIndices: ConstraintEdit
     };
 }
 
-function ensureExpectedConstraintBonds(kind: ConstraintKind, atomIndices: ConstraintEditSession['atomIndices'], hasBond: (a: number, b: number) => boolean) {
-    if (kind === 'distance') {
-        if (!hasBond(atomIndices[0] as number, atomIndices[1] as number)) {
-            throw new Error('The selected distance atoms are not connected by a bond.');
-        }
-        return;
-    }
-    if (kind === 'angle') {
-        if (!hasBond(atomIndices[0] as number, atomIndices[1] as number) || !hasBond(atomIndices[1] as number, atomIndices[2] as number)) {
-            throw new Error('The selected angle atoms must form a bonded path A-B-C.');
-        }
-        return;
-    }
-    if (!hasBond(atomIndices[0] as number, atomIndices[1] as number)
-        || !hasBond(atomIndices[1] as number, atomIndices[2] as number)
-        || !hasBond(atomIndices[2] as number, atomIndices[3] as number)) {
-        throw new Error('The selected dihedral atoms must form a bonded path A-B-C-D.');
-    }
-}
-
 function addUndirectedEdge(adjacency: Map<number, Set<number>>, a: number, b: number) {
     if (!adjacency.has(a)) adjacency.set(a, new Set<number>());
     if (!adjacency.has(b)) adjacency.set(b, new Set<number>());
@@ -519,8 +499,6 @@ export function createConstraintEditSession({
     }
 
     const adjacency = buildAtomAdjacency(structure, atomIndices as number[]);
-    ensureExpectedConstraintBonds(kind, atomIndices, (a, b) => adjacency.get(a)?.has(b) ?? false);
-
     const initialFrame = cloneFrame(model);
     const baseFrame = cloneFrame(model);
     const currentFrame = cloneFrame(model);

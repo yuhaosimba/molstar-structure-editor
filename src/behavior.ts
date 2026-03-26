@@ -24,6 +24,16 @@ export type StructureEditorOptions = {
     realtimeUpdateMode?: 'always'
 };
 
+export type QuickStylePreset = 'default' | 'cartoon' | 'ball-and-stick' | 'spacefill' | 'surface';
+
+export function toRepresentationPresetId(preset: QuickStylePreset): string {
+    if (preset === 'cartoon') return 'polymer-and-ligand';
+    if (preset === 'ball-and-stick') return 'atomic-detail';
+    if (preset === 'spacefill') return 'illustrative';
+    if (preset === 'surface') return 'molecular-surface';
+    return 'auto';
+}
+
 export const DEFAULT_GIZMO_SCALE = 2.5;
 
 type TrackballBindings = NonNullable<NonNullable<PluginContext['canvas3d']>['attribs']['trackball']>['bindings'];
@@ -246,6 +256,7 @@ export class StructureEditorController {
     private sourceStructureRef: string | undefined = void 0;
     private previewStructureRef: string | undefined = void 0;
     private constraintPanel: ConstraintPanelElements | undefined = void 0;
+    private quickStylePreset: QuickStylePreset = 'default';
 
     constructor(private readonly plugin: PluginContext, private readonly options: Required<StructureEditorOptions>) {
         this.updater = new CoordinateUpdater(plugin);
@@ -444,7 +455,7 @@ export class StructureEditorController {
         if (!this.previewStructureRef) {
             setSubtreeVisibility(this.plugin.state.data, sourceStructureRef, true);
             const structure = await this.plugin.builders.structure.createStructure(coordinateModelRef);
-            await this.plugin.builders.structure.representation.applyPreset(structure, 'auto');
+            await this.plugin.builders.structure.representation.applyPreset(structure, toRepresentationPresetId(this.quickStylePreset));
             this.previewStructureRef = structure.ref;
             return;
         }
@@ -597,12 +608,13 @@ export class StructureEditorController {
         this.endPointerDrag(event.pointerId);
     };
 
-    private async applyQuickStyle(preset: 'default' | 'cartoon' | 'ball-and-stick' | 'spacefill' | 'surface') {
+    private async applyQuickStyle(preset: QuickStylePreset) {
         const structures = this.plugin.managers.structure.hierarchy.current.structures;
         if (structures.length === 0) {
             showToast(this.plugin, 'Structure Editor', 'Load a structure before applying a style.');
             return;
         }
+        this.quickStylePreset = preset;
 
         const provider = preset === 'default'
             ? this.plugin.builders.structure.representation.resolveProvider(

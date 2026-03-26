@@ -302,13 +302,51 @@ describe('constraint edit sessions', () => {
         expect(session.flexStrength).toBeCloseTo(0.7, 6);
     });
 
-    it('throws when selected atoms do not define the expected bonded path', () => {
+    it('allows selecting non-bonded atoms for distance by falling back to atom scope', () => {
         const model = createModel([[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
-        expect(() => createConstraintEditSession({
+        const session = createConstraintEditSession({
             kind: 'distance',
             model,
             structure: createStructure(model, 3, [[0, 1], [1, 2]]),
             atomIndices: [0, 2],
-        })).toThrowError('not connected by a bond');
+        });
+
+        expect(session.moveScope).toBe('atom');
+        expect(session.movableAtomIndices).toEqual([2]);
+
+        session.update(3);
+        expect(session.currentValue).toBeCloseTo(3, 5);
+    });
+
+    it('allows selecting non-bonded atoms for angle by falling back to atom scope', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]]);
+        const session = createConstraintEditSession({
+            kind: 'angle',
+            model,
+            structure: createStructure(model, 4, [[0, 1], [2, 3]]),
+            atomIndices: [0, 1, 2],
+        });
+
+        expect(session.moveScope).toBe('atom');
+        expect(session.movableAtomIndices).toEqual([2]);
+
+        session.update(120);
+        expect(session.currentValue).toBeCloseTo(120, 5);
+    });
+
+    it('allows selecting non-bonded atoms for dihedral by falling back to atom scope', () => {
+        const model = createModel([[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 1], [2, 2, 1]]);
+        const session = createConstraintEditSession({
+            kind: 'dihedral',
+            model,
+            structure: createStructure(model, 5, [[0, 1], [3, 4]]),
+            atomIndices: [0, 1, 2, 3],
+        });
+
+        expect(session.moveScope).toBe('atom');
+        expect(session.movableAtomIndices).toEqual([3]);
+
+        session.update(90);
+        expect(session.currentValue).toBeCloseTo(90, 5);
     });
 });
